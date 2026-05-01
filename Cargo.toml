@@ -2,7 +2,6 @@
 
 members = [
     "quill",
-    "quill-conf",
     "quill-core",
     "quill-drivers",
     "quill-engine",
@@ -31,7 +30,6 @@ expect_used = "warn"
 complexity = { level = "warn", priority = -1 }
 
 [workspace.dependencies]
-quill-conf = { path = "quill-conf" }
 quill-core = { path = "quill-core" }
 quill-drivers = { path = "quill-drivers" }
 quill-engine = { path = "quill-engine" }
@@ -48,6 +46,7 @@ clap = { version = "4", features = ["derive"] }
 pretty_assertions = "1"
 thiserror = "2"
 futures = "0.3"
+indexmap = { version = "2", features = ["serde"] }
 indoc = "2"
 url = { version = "2.5", features = ["serde"] }
 sqlx = { version = "0.8", features = [
@@ -63,6 +62,10 @@ sqlx = { version = "0.8", features = [
 ] }
 chrono = { version = "0.4", features = ["serde"] }
 secrecy = { version = "0.10.3", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+toml = "0.8"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [profile.dev]
 debug = "line-tables-only"
