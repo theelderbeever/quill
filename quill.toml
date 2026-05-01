@@ -1,0 +1,15 @@
+[workspace.analytics]
+connections = ["pg_prod", "ch_prod"]
+
+[connection.pg]
+kind = "postgres"
+# other postgres connection details
+
+[connection.ch]
+kind = "clickhouse"
+# other clickhouse connection details
+
+[connection.duckdb]
+kind = "duckdb"
+database = ":memory:"
+base_dir = "./data"
