@@ -1,0 +1,16 @@
+[package]
+name = "quill-gui"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+quill-core = { workspace = true }
+quill-engine = { workspace = true }
+
+gpui = "0.2.2"
+gpui-component = { version = "0.5.1", features = ["decimal"] }
+
+[lints]
+workspace = true

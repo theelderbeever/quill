@@ -1,0 +1,12 @@
+[package]
+name = "quill-drivers"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+quill-core = { workspace = true }
+
+[lints]
+workspace = true

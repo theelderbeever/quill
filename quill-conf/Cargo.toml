@@ -1,0 +1,12 @@
+[package]
+name = "quill-conf"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+quill-core = { workspace = true }
+
+[lints]
+workspace = true

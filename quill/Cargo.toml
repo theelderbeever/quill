@@ -1,0 +1,15 @@
+[package]
+name = "quill"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+quill-conf = { workspace = true }
+quill-engine = { workspace = true }
+quill-gui = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,74 @@
+[workspace]
+
+members = [
+    "quill",
+    "quill-conf",
+    "quill-core",
+    "quill-drivers",
+    "quill-engine",
+    "quill-federation",
+    "quill-gui",
+]
+
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+authors = ["Taylor Beever <taybeever@gmail.com>"]
+edition = "2024"
+rust-version = "1.93"
+
+[workspace.lints]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+print_stdout = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+complexity = { level = "warn", priority = -1 }
+
+[workspace.dependencies]
+quill-conf = { path = "quill-conf" }
+quill-core = { path = "quill-core" }
+quill-drivers = { path = "quill-drivers" }
+quill-engine = { path = "quill-engine" }
+quill-federation = { path = "quill-federation" }
+quill-gui = { path = "quill-gui" }
+
+config = "0.15"
+tracing = { version = "0.1.44", features = ["async-await"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-opentelemetry = { version = "0.28", features = ["thiserror"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+pretty_assertions = "1"
+thiserror = "2"
+futures = "0.3"
+indoc = "2"
+url = { version = "2.5", features = ["serde"] }
+sqlx = { version = "0.8", features = [
+    "uuid",
+    "postgres",
+    "runtime-tokio-rustls",
+    "chrono",
+    "json",
+    "macros",
+    "migrate",
+    "derive",
+    "bigdecimal",
+] }
+chrono = { version = "0.4", features = ["serde"] }
+secrecy = { version = "0.10.3", features = ["serde"] }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+strip = 'symbols'

@@ -1,0 +1,13 @@
+[package]
+name = "quill-federation"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+quill-core = { workspace = true }
+quill-drivers = { workspace = true }
+
+[lints]
+workspace = true
