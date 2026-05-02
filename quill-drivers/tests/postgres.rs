@@ -1,5 +1,3 @@
-#![cfg(feature = "postgres")]
-
 use std::collections::BTreeMap;
 
 use quill_core::{ConnectionSpec, PostgresSpec};

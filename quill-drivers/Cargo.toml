@@ -10,17 +10,10 @@ quill-core = { workspace = true }
 anyhow = { workspace = true }
 secrecy = { workspace = true }
 tokio = { workspace = true }
-datafusion-table-providers = { workspace = true, optional = true }
+datafusion-table-providers = { workspace = true, features = ["postgres"] }
 
 [dev-dependencies]
 url = { workspace = true }
-
-[features]
-default = []
-postgres = [
-    "dep:datafusion-table-providers",
-    "datafusion-table-providers/postgres",
-]
 
 [lints]
 workspace = true
