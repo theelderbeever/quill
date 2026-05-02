@@ -1,0 +1,9 @@
+services:
+  pg:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: quill
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: quilt_test
+    ports:
+      - 5432:5432

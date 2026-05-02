@@ -37,6 +37,7 @@ quill-federation = { path = "quill-federation" }
 quill-gui = { path = "quill-gui" }
 
 config = "0.15"
+datafusion-table-providers = { version = "0.11", features = ["postgres"] }
 tracing = { version = "0.1.44", features = ["async-await"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-opentelemetry = { version = "0.28", features = ["thiserror"] }

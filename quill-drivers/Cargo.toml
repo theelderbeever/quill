@@ -7,6 +7,13 @@ rust-version.workspace = true
 
 [dependencies]
 quill-core = { workspace = true }
+anyhow = { workspace = true }
+secrecy = { workspace = true }
+tokio = { workspace = true }
+datafusion-table-providers = { workspace = true, features = ["postgres"] }
+
+[dev-dependencies]
+url = { workspace = true }
 
 [lints]
 workspace = true
