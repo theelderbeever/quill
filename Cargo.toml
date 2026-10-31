@@ -3,6 +3,7 @@ members = [
   "quill",
   "quill-core",
   "quill-drivers",
+  "quill-io",
 ]
 
 resolver = "2"
@@ -15,9 +16,11 @@ rust-version = "1.99"
 [workspace.dependencies]
 quill-core = { path = "quill-core" }
 quill-drivers = { path = "quill-drivers" }
+quill-io = { path = "quill-io" }
 
 anyhow = "1"
 arrow = { version = "59.2", default-features = false }
+async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 clickhouse = { version = "0.15.3", features = ["native-tls"] }

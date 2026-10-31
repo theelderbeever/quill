@@ -12,6 +12,7 @@ pub struct ClientMetrics {
     pub elapsed: Duration,
     /// Time from submission to the first non-empty batch. Absent for rowless results.
     pub first_row: Option<Duration>,
+    /// Rows handed to the consumer.
     pub delivered_rows: u64,
     pub delivered_batches: u64,
     pub affected_rows: Option<u64>,

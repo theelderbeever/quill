@@ -3161,6 +3161,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "quill-io"
+version = "0.1.0-alpha.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "datafusion",
+ "futures",
+ "quill-core",
+ "quill-drivers",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
