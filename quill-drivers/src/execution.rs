@@ -56,6 +56,14 @@ where
     F: FnOnce(mpsc::Sender<Result<QueryEvent>>, Arc<Control>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<()>> + Send + 'static,
 {
+    start_with_id(QueryId::new(), work)
+}
+
+pub(crate) fn start_with_id<F, Fut>(id: QueryId, work: F) -> QueryExecution
+where
+    F: FnOnce(mpsc::Sender<Result<QueryEvent>>, Arc<Control>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+{
     let control = Arc::new(Control {
         start: Instant::now(),
         state: Mutex::new(ExecutionSnapshot {
@@ -95,7 +103,7 @@ where
         receiver.recv().await.map(|event| (event, receiver))
     });
     QueryExecution {
-        id: QueryId::new(),
+        id,
         events: Box::pin(events),
         control,
     }
@@ -136,6 +144,18 @@ impl Control {
 mod tests {
     use super::*;
     use futures::TryStreamExt;
+
+    #[tokio::test]
+    async fn preserves_id_and_freezes_completed_timing() {
+        let id = QueryId::new();
+        let mut execution = start_with_id(id, |_, _| async { Ok(()) });
+        assert_eq!(execution.id, id);
+        while execution.events.try_next().await.unwrap().is_some() {}
+        let snapshot = execution.control.snapshot();
+        assert_eq!(snapshot.status, ExecutionStatus::Completed);
+        execution.control.cancel();
+        assert_eq!(execution.control.snapshot(), snapshot);
+    }
 
     #[tokio::test]
     async fn cancellation_stays_terminal() {

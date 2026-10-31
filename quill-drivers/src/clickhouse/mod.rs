@@ -57,63 +57,95 @@ impl ConnectionPool for ClickhouseConnectionPool {
     ) -> PoolFuture<'_, quill_core::query::QueryExecution> {
         let client = self.client.clone();
         Box::pin(async move {
-            Ok(crate::execution::start(move |sender, control| async move {
-                use clickhouse_ext_arrow::ArrowQueryExt;
-                use quill_core::query::QueryEvent;
-                let mut query = client.query(&request.sql);
-                for value in request.bindings.positional {
-                    query = Self::bind_parameter(query, None, value);
-                }
-                for (name, value) in request.bindings.named {
-                    query = Self::bind_parameter(query, Some(&name), value);
-                }
-                let mut cursor = query
-                    .fetch_arrow()
-                    .map_err(|e| Error::QueryExecution(Box::new(e)))?;
-                let mut schema_sent = false;
-                loop {
-                    let batch = cursor
-                        .next()
-                        .await
+            let id = quill_core::query::QueryId::new();
+            Ok(crate::execution::start_with_id(
+                id,
+                move |sender, control| async move {
+                    use clickhouse_ext_arrow::ArrowQueryExt;
+                    use quill_core::query::QueryEvent;
+                    let mut query = client
+                        .query(&request.sql)
+                        .with_setting("query_id", format!("quill::{id}"));
+                    for value in request.bindings.positional {
+                        query = Self::bind_parameter(query, None, value);
+                    }
+                    for (name, value) in request.bindings.named {
+                        query = Self::bind_parameter(query, Some(&name), value);
+                    }
+                    let mut cursor = query
+                        .fetch_arrow()
                         .map_err(|e| Error::QueryExecution(Box::new(e)))?;
-                    if !schema_sent && let Some(schema) = cursor.schema() {
+                    let mut schema_sent = false;
+                    loop {
+                        let batch = cursor
+                            .next()
+                            .await
+                            .map_err(|e| Error::QueryExecution(Box::new(e)))?;
+                        if !schema_sent && let Some(schema) = cursor.schema() {
+                            control
+                                .send(
+                                    &sender,
+                                    QueryEvent::Schema {
+                                        result_set: 0,
+                                        schema,
+                                    },
+                                )
+                                .await?;
+                            schema_sent = true;
+                        }
+                        let Some(batch) = batch else {
+                            break;
+                        };
                         control
                             .send(
                                 &sender,
-                                QueryEvent::Schema {
+                                QueryEvent::Batch {
                                     result_set: 0,
-                                    schema,
+                                    batch,
                                 },
                             )
                             .await?;
-                        schema_sent = true;
                     }
-                    let Some(batch) = batch else {
-                        break;
-                    };
                     control
                         .send(
                             &sender,
-                            QueryEvent::Batch {
+                            QueryEvent::ResultSetComplete {
                                 result_set: 0,
-                                batch,
+                                affected_rows: None,
                             },
                         )
                         .await?;
-                }
-                control
-                    .send(
-                        &sender,
-                        QueryEvent::ResultSetComplete {
-                            result_set: 0,
-                            affected_rows: None,
-                        },
-                    )
-                    .await?;
-                Ok(())
-            }))
+                    Ok(())
+                },
+            ))
         })
     }
+    fn execution_metrics(
+        &self,
+        id: quill_core::query::QueryId,
+    ) -> PoolFuture<'_, Option<quill_core::query::ServerMetrics>> {
+        Box::pin(async move {
+            #[derive(serde::Deserialize, clickhouse::Row)]
+            struct MetricsRow {
+                query_duration_ms: u64,
+                read_bytes: u64,
+                memory_usage: u64,
+            }
+            let rows = self.client.query(
+                "SELECT query_duration_ms, read_bytes, toUInt64(greatest(memory_usage, 0)) AS memory_usage FROM system.query_log WHERE query_id = ? AND type IN ('QueryFinish', 'ExceptionWhileProcessing') ORDER BY event_time_microseconds DESC LIMIT 1"
+            ).bind(format!("quill::{id}")).fetch_all::<MetricsRow>().await
+                .map_err(|e| Error::QueryExecution(Box::new(e)))?;
+            Ok(rows
+                .into_iter()
+                .next()
+                .map(|row| quill_core::query::ServerMetrics {
+                    elapsed: Some(std::time::Duration::from_millis(row.query_duration_ms)),
+                    scanned_bytes: Some(row.read_bytes),
+                    memory_bytes: Some(row.memory_usage),
+                }))
+        })
+    }
+
     type Settings = ClickhouseSettings;
 
     fn list_catalogs(&self) -> PoolFuture<'_, Vec<CatalogRef>> {

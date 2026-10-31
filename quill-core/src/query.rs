@@ -145,6 +145,15 @@ pub struct ExecutionMetrics {
     pub warnings: Vec<String>,
 }
 
+/// Optional server measurements retrieved for one execution after submission.
+/// Absence may mean the server log has not been flushed yet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServerMetrics {
+    pub elapsed: Option<std::time::Duration>,
+    pub scanned_bytes: Option<u64>,
+    pub memory_bytes: Option<u64>,
+}
+
 /// An atomic observation of an execution's status and counters.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionSnapshot {

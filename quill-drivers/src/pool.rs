@@ -58,6 +58,24 @@ pub trait ConnectionPool: Send + Sync {
         Box::pin(async { Err(Error::UnsupportedOperation("execute query")) })
     }
 
+    /// Retrieve optional server measurements for this execution only.
+    /// Call again later if asynchronous server logs have not appeared yet.
+    /// Local timing and counters remain available through execution control,
+    /// including when a driver has no server measurements.
+    ///
+    /// ```no_run
+    /// # async fn inspect(pool: &dyn quill_drivers::ConnectionPool, id: quill_core::query::QueryId) -> quill_core::error::Result<()> {
+    /// let metrics = pool.execution_metrics(id).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn execution_metrics(
+        &self,
+        _id: quill_core::query::QueryId,
+    ) -> PoolFuture<'_, Option<quill_core::query::ServerMetrics>> {
+        Box::pin(async { Ok(None) })
+    }
+
     /// List catalogs visible to this connection.
     fn list_catalogs(&self) -> PoolFuture<'_, Vec<CatalogRef>> {
         Box::pin(async { Err(Error::UnsupportedOperation("list catalogs")) })
