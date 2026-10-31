@@ -1,0 +1,29 @@
+# Generate certificates and start: just docker
+services:
+  scylla:
+    volumes:
+      - ./docker/tls/scylla.yaml:/etc/scylla/scylla.yaml:ro
+      - ./docker/tls/certs:/etc/quill-tls:ro
+
+  mysql:
+    command:
+      - --ssl-ca=/etc/quill-tls/ca.pem
+      - --ssl-cert=/etc/quill-tls/rustfs_cert.pem
+      - --ssl-key=/etc/quill-tls/rustfs_key.pem
+      - --require-secure-transport=ON
+    volumes:
+      - ./docker/tls/certs:/etc/quill-tls:ro
+
+  clickhouse:
+    volumes:
+      - ./docker/tls/clickhouse.xml:/etc/clickhouse-server/config.d/tls.xml:ro
+      - ./docker/tls/certs:/etc/quill-tls:ro
+    ports:
+      - 8443:8443
+      - 9440:9440
+
+  rustfs:
+    environment:
+      RUSTFS_TLS_PATH: /etc/quill-tls
+    volumes:
+      - ./docker/tls/certs:/etc/quill-tls:ro

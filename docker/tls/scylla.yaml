@@ -1,0 +1,14 @@
+cluster_name: quill
+listen_address: 0.0.0.0
+rpc_address: 0.0.0.0
+seed_provider:
+  - class_name: org.apache.cassandra.locator.SimpleSeedProvider
+    parameters:
+      - seeds: "127.0.0.1"
+endpoint_snitch: SimpleSnitch
+developer_mode: true
+client_encryption_options:
+  enabled: true
+  certificate: /etc/quill-tls/rustfs_cert.pem
+  keyfile: /etc/quill-tls/rustfs_key.pem
+  require_client_auth: false

@@ -1,0 +1,14 @@
+<clickhouse>
+    <http_port remove="1"/>
+    <tcp_port remove="1"/>
+    <https_port>8443</https_port>
+    <tcp_port_secure>9440</tcp_port_secure>
+    <openSSL>
+        <server>
+            <certificateFile>/etc/quill-tls/rustfs_cert.pem</certificateFile>
+            <privateKeyFile>/etc/quill-tls/rustfs_key.pem</privateKeyFile>
+            <caConfig>/etc/quill-tls/ca.pem</caConfig>
+            <verificationMode>none</verificationMode>
+        </server>
+    </openSSL>
+</clickhouse>

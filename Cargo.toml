@@ -4,18 +4,14 @@ members = [
     "quill",
     "quill-core",
     "quill-drivers",
-    "quill-engine",
-    "quill-federation",
-    "quill-gui",
 ]
 
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
-authors = ["Taylor Beever <taybeever@gmail.com>"]
+version = "0.1.0-alpha.0"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.99"
 
 [workspace.lints]
 
@@ -32,11 +28,12 @@ complexity = { level = "warn", priority = -1 }
 [workspace.dependencies]
 quill-core = { path = "quill-core" }
 quill-drivers = { path = "quill-drivers" }
-quill-engine = { path = "quill-engine" }
-quill-federation = { path = "quill-federation" }
-quill-gui = { path = "quill-gui" }
 
-config = "0.15"
+arrow = { version = "59.2", default-features = false }
+datafusion = "55.2"
+clickhouse = { version = "0.15.3", features = ["native-tls"] }
+clickhouse-ext-arrow = "0.2"
+figment = { version = "0.10", features = ["toml", "env"] }
 datafusion-table-providers = { version = "0.11", features = ["postgres"] }
 tracing = { version = "0.1.44", features = ["async-await"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,7 +1,6 @@
 [package]
 name = "quill-drivers"
 version.workspace = true
-authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
@@ -10,10 +9,25 @@ quill-core = { workspace = true }
 anyhow = { workspace = true }
 secrecy = { workspace = true }
 tokio = { workspace = true }
-datafusion-table-providers = { workspace = true, features = ["postgres"] }
 
-[dev-dependencies]
+sqlx = { workspace = true, features = ["mysql", "sqlite"] }
+clickhouse.workspace = true
+clickhouse-ext-arrow.workspace = true
+arrow.workspace = true
+datafusion.workspace = true
+object_store = { version = "0.13.2", features = ["aws", "azure", "gcp", "http"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper-tls = "0.6"
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+scylla = { version = "1.9", features = ["openssl-010"] }
+openssl = "0.10"
+serde.workspace = true
 url = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+toml.workspace = true
+tempfile.workspace = true

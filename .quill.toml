@@ -1,0 +1,65 @@
+# Development services started by `just docker`.
+# These credentials are public development fixtures.
+
+[connection.postgres]
+kind = "postgres"
+host = "localhost"
+port = 5432
+database = "quilt_test"
+user = "quill"
+password = "password"
+
+[connection.mysql]
+kind = "mysql"
+host = "localhost"
+port = 3306
+database = "quilt_test"
+user = "quill"
+password = "password"
+tls = { ca_cert = "docker/tls/certs/ca.pem" }
+
+[connection.clickhouse]
+kind = "clickhouse"
+host = "localhost:8443"
+database = "quilt_test"
+user = "quill"
+password = "password"
+tls = { ca_cert = "docker/tls/certs/ca.pem" }
+
+[connection.scylla]
+kind = "scylla"
+nodes = ["localhost:9042"]
+tls = { ca_cert = "docker/tls/certs/ca.pem" }
+# No authentication or keyspace is provisioned by Compose.
+
+[connection.sqlite]
+kind = "sqlite"
+path = ":memory:"
+
+[connection.files]
+kind = "datafusion"
+
+[[connection.files.object_stores]]
+kind = "local"
+path = "."
+tables = []
+
+# Add local tables once their directories contain data:
+# tables = [
+#     { name = "events", format = "parquet", path = "data/events/" },
+#     { name = "logs", format = "json", path = "data/logs/" },
+#     { name = "people", format = "csv", path = "data/people/", has_header = true },
+# ]
+
+[[connection.files.object_stores]]
+kind = "aws"
+url = "s3://quill"
+endpoint = "https://localhost:9000"
+region = "us-east-1"
+access_key_id = "quill"
+secret_access_key = "password"
+# RustFS uses our generated CA. The generic options API cannot load that CA
+# yet; this bypass is strictly for the local development fixture.
+options = { aws_allow_invalid_certificates = "true" }
+# Create the quill bucket and upload files before registering tables.
+tables = []

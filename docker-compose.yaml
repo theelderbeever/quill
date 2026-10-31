@@ -7,3 +7,45 @@ services:
       POSTGRES_DB: quilt_test
     ports:
       - 5432:5432
+
+  scylla:
+    image: scylladb/scylla:latest
+    command: ["--smp", "1", "--memory", "1G", "--overprovisioned", "1"]
+    ports:
+      - 9042:9042
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_USER: quill
+      MYSQL_PASSWORD: password
+      MYSQL_DATABASE: quilt_test
+    ports:
+      - 3306:3306
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    environment:
+      CLICKHOUSE_USER: quill
+      CLICKHOUSE_PASSWORD: password
+      CLICKHOUSE_DB: quilt_test
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - 8123:8123
+      - 9002:9000 # Native protocol; 9000 is used by RustFS.
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ACCESS_KEY: quill
+      RUSTFS_SECRET_KEY: password
+      RUSTFS_CONSOLE_ENABLE: "true"
+    ports:
+      - 9000:9000
+      - 9001:9001
