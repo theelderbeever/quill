@@ -1,0 +1,24 @@
+[package]
+name = "quill-io"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+arrow = { workspace = true, features = ["ipc"] }
+async-trait = { workspace = true, optional = true }
+datafusion = { workspace = true, optional = true }
+futures.workspace = true
+quill-core.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+quill-drivers.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[features]
+datafusion = ["dep:async-trait", "dep:datafusion"]
+
+[lints]
+workspace = true

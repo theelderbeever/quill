@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{num::NonZeroU64, path::PathBuf};
 
 use figment::{
     Figment,
@@ -18,6 +18,18 @@ use quill_core::error::{Error, Result};
 pub struct Settings {
     #[serde(default)]
     pub connection: IndexMap<String, ConnectionSettings>,
+    #[serde(default)]
+    pub results: ResultSettings,
+}
+
+/// Where drained query results are written. Each query session gets its own
+/// temporary directory, removed when the session ends.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ResultSettings {
+    /// Parent of per-session directories; the system temp directory when unset.
+    pub dir: Option<PathBuf>,
+    /// Bytes written per query before streaming stops; unlimited when unset.
+    pub max_bytes: Option<NonZeroU64>,
 }
 
 impl Settings {
