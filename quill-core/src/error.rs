@@ -4,6 +4,9 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("operation is not supported: {0}")]
+    UnsupportedOperation(&'static str),
+
     #[error("config: {0}")]
     Config(String),
 

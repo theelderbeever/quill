@@ -2,7 +2,7 @@ mod pool;
 
 pub mod settings;
 
-pub use pool::ConnectionPool;
+pub use pool::{Capabilities, ConnectionPool, PoolFuture};
 
 pub mod clickhouse;
 pub mod mysql;

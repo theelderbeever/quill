@@ -8,8 +8,8 @@ services:
   mysql:
     command:
       - --ssl-ca=/etc/quill-tls/ca.pem
-      - --ssl-cert=/etc/quill-tls/rustfs_cert.pem
-      - --ssl-key=/etc/quill-tls/rustfs_key.pem
+      - --ssl-cert=/etc/quill-tls/development_cert.pem
+      - --ssl-key=/etc/quill-tls/development_key.pem
       - --require-secure-transport=ON
     volumes:
       - ./docker/tls/certs:/etc/quill-tls:ro

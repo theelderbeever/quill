@@ -1,12 +1,18 @@
+mod metadata;
+use metadata::ColumnField;
+
 mod settings;
 pub use settings::{
     DatafusionSettings, FileFormat, FileTableSettings, ObjectStoreProvider, ObjectStoreSettings,
 };
 
 use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionContext};
-use quill_core::error::{Error, Result};
+use quill_core::{
+    error::{Error, Result},
+    metadata::*,
+};
 
-use crate::ConnectionPool;
+use crate::{ConnectionPool, PoolFuture};
 
 /// An embedded DataFusion session shared through the connection-pool interface.
 /// The session owns its runtime, registered stores, and table catalog.
@@ -33,6 +39,73 @@ impl DatafusionConnectionPool {
 
 impl ConnectionPool for DatafusionConnectionPool {
     type Settings = DatafusionSettings;
+
+    fn list_catalogs(&self) -> PoolFuture<'_, Vec<CatalogRef>> {
+        Box::pin(async {
+            let mut names = self.inner.catalog_names();
+            names.sort();
+            Ok(names.into_iter().map(|name| CatalogRef { name }).collect())
+        })
+    }
+    fn list_schemas<'a>(&'a self, catalog: &'a CatalogRef) -> PoolFuture<'a, Vec<SchemaRef>> {
+        Box::pin(async move {
+            let Some(provider) = self.inner.catalog(&catalog.name) else {
+                return Ok(Vec::new());
+            };
+            let mut names = provider.schema_names();
+            names.sort();
+            Ok(names
+                .into_iter()
+                .map(|name| SchemaRef {
+                    catalog: catalog.clone(),
+                    name,
+                })
+                .collect())
+        })
+    }
+    fn list_tables<'a>(&'a self, schema: &'a SchemaRef) -> PoolFuture<'a, Vec<TableRef>> {
+        Box::pin(async move {
+            let Some(provider) = self
+                .inner
+                .catalog(&schema.catalog.name)
+                .and_then(|c| c.schema(&schema.name))
+            else {
+                return Ok(Vec::new());
+            };
+            let mut names = provider.table_names();
+            names.sort();
+            Ok(names
+                .into_iter()
+                .map(|name| TableRef {
+                    schema: schema.clone(),
+                    name,
+                })
+                .collect())
+        })
+    }
+    fn describe_table<'a>(&'a self, table: &'a TableRef) -> PoolFuture<'a, TableMetadata> {
+        Box::pin(async move {
+            let provider = self
+                .inner
+                .catalog(&table.schema.catalog.name)
+                .and_then(|c| c.schema(&table.schema.name))
+                .ok_or_else(|| Error::DriverExecute(anyhow::anyhow!("schema not found")))?;
+            let provider = provider
+                .table(&table.name)
+                .await
+                .map_err(|e| Error::DriverExecute(e.into()))?
+                .ok_or_else(|| Error::DriverExecute(anyhow::anyhow!("table not found")))?;
+            Ok(TableMetadata {
+                table: table.clone(),
+                columns: provider
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|field| ColumnMetadata::from(ColumnField(field)))
+                    .collect(),
+            })
+        })
+    }
 
     async fn connect(settings: &Self::Settings) -> Result<Self> {
         let connect = async {
@@ -160,7 +233,24 @@ mod tests {
             batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
             5
         );
-        let _shared: Arc<dyn ConnectionPool> = Arc::new(pool);
+        let shared: Arc<dyn ConnectionPool> = Arc::new(pool);
+        let catalogs = shared.list_catalogs().await?;
+        let schemas = shared.list_schemas(&catalogs[0]).await?;
+        let schema = schemas
+            .iter()
+            .find(|s| s.name == "public")
+            .ok_or_else(|| anyhow::anyhow!("missing schema"))?;
+        let tables = shared.list_tables(schema).await?;
+        let table = tables
+            .iter()
+            .find(|t| t.name == "csv_data")
+            .ok_or_else(|| anyhow::anyhow!("missing table"))?;
+        let metadata = shared.describe_table(table).await?;
+        assert_eq!(metadata.columns[0].name, "id");
+        assert!(matches!(
+            shared.list_indexes(table).await,
+            Err(Error::UnsupportedOperation(_))
+        ));
         Ok(())
     }
 }

@@ -1,8 +1,14 @@
+mod metadata;
+use metadata::{ColumnRow, IndexRow, NameRow, SchemaRow, TableRow};
+
 mod settings;
 pub use settings::ClickhouseSettings;
 
-use crate::ConnectionPool;
-use quill_core::error::{Error, Result};
+use crate::{ConnectionPool, PoolFuture};
+use quill_core::{
+    error::{Error, Result},
+    metadata::*,
+};
 use secrecy::ExposeSecret;
 
 /// Official ClickHouse client backed by a reusable HTTP connection pool.
@@ -40,6 +46,79 @@ impl ClickhouseConnectionPool {
 
 impl ConnectionPool for ClickhouseConnectionPool {
     type Settings = ClickhouseSettings;
+
+    fn list_catalogs(&self) -> PoolFuture<'_, Vec<CatalogRef>> {
+        Box::pin(async {
+            Ok(vec![CatalogRef {
+                name: "clickhouse".into(),
+            }])
+        })
+    }
+    fn list_schemas<'a>(&'a self, catalog: &'a CatalogRef) -> PoolFuture<'a, Vec<SchemaRef>> {
+        Box::pin(async move {
+            if catalog.name != "clickhouse" {
+                return Ok(Vec::new());
+            }
+            let rows = self
+                .client
+                .query("SELECT name FROM system.databases ORDER BY name")
+                .fetch_all::<NameRow>()
+                .await
+                .map_err(|e| Error::DriverExecute(e.into()))?;
+            Ok(rows
+                .into_iter()
+                .map(|row| SchemaRef::from(SchemaRow { row, catalog }))
+                .collect())
+        })
+    }
+    fn list_tables<'a>(&'a self, schema: &'a SchemaRef) -> PoolFuture<'a, Vec<TableRef>> {
+        Box::pin(async move {
+            if schema.catalog.name != "clickhouse" {
+                return Ok(Vec::new());
+            }
+            let rows = self
+                .client
+                .query("SELECT name FROM system.tables WHERE database = ? ORDER BY name")
+                .bind(&schema.name)
+                .fetch_all::<NameRow>()
+                .await
+                .map_err(|e| Error::DriverExecute(e.into()))?;
+            Ok(rows
+                .into_iter()
+                .map(|row| TableRef::from(TableRow { row, schema }))
+                .collect())
+        })
+    }
+    fn describe_table<'a>(&'a self, table: &'a TableRef) -> PoolFuture<'a, TableMetadata> {
+        Box::pin(async move {
+            if table.schema.catalog.name != "clickhouse" {
+                return Err(Error::DriverExecute(anyhow::anyhow!("catalog not found")));
+            }
+            let exists = self
+                .client
+                .query("SELECT count() FROM system.tables WHERE database = ? AND name = ?")
+                .bind(&table.schema.name)
+                .bind(&table.name)
+                .fetch_one::<u64>()
+                .await
+                .map_err(|e| Error::DriverExecute(e.into()))?;
+            if exists == 0 {
+                return Err(Error::DriverExecute(anyhow::anyhow!("table not found")));
+            }
+            let rows = self.client.query("SELECT name, type AS native_type FROM system.columns WHERE database = ? AND table = ? ORDER BY position").bind(&table.schema.name).bind(&table.name).fetch_all::<ColumnRow>().await.map_err(|e| Error::DriverExecute(e.into()))?;
+            Ok(TableMetadata {
+                table: table.clone(),
+                columns: rows.into_iter().map(ColumnMetadata::from).collect(),
+            })
+        })
+    }
+    fn list_indexes<'a>(&'a self, table: &'a TableRef) -> PoolFuture<'a, Vec<IndexMetadata>> {
+        Box::pin(async move {
+            self.describe_table(table).await?;
+            let rows = self.client.query("SELECT name, type_full AS access_method, expr AS expression FROM system.data_skipping_indices WHERE database = ? AND table = ? ORDER BY name").bind(&table.schema.name).bind(&table.name).fetch_all::<IndexRow>().await.map_err(|e| Error::DriverExecute(e.into()))?;
+            Ok(rows.into_iter().map(IndexMetadata::from).collect())
+        })
+    }
 
     async fn connect(settings: &Self::Settings) -> Result<Self> {
         let connect = async {
