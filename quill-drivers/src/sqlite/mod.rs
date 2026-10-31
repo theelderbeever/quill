@@ -1,3 +1,4 @@
+mod execute;
 mod metadata;
 use metadata::{ColumnRow, IndexKeyRow, IndexRow, NameRow, SchemaRow, TableRow};
 
@@ -24,6 +25,18 @@ impl SqliteConnectionPool {
 }
 
 impl ConnectionPool for SqliteConnectionPool {
+    fn capabilities(&self) -> crate::Capabilities {
+        crate::Capabilities {
+            named_parameters: false,
+            positional_parameters: true,
+        }
+    }
+    fn execute(
+        &self,
+        request: quill_core::query::QueryRequest,
+    ) -> PoolFuture<'_, quill_core::query::QueryExecution> {
+        Box::pin(async move { Ok(self.start_execution(request)) })
+    }
     type Settings = SqliteSettings;
 
     /// SQLite has one connection-local catalog; attached databases are schemas.

@@ -1,3 +1,9 @@
+## Query Execution
+
+- Delegate query and parameter validation to the native database driver or database. Do not parse
+  SQL or add checks for parameter counts, missing or unused bindings, or other conditions the native
+  driver already reports descriptively. Adapt bindings to the native API and propagate its errors.
+
 ## DataType Handling
 
 - Preserve native value semantics and precision when converting results to Arrow. RecordBatch values

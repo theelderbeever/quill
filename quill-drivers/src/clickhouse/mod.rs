@@ -45,6 +45,75 @@ impl ClickhouseConnectionPool {
 }
 
 impl ConnectionPool for ClickhouseConnectionPool {
+    fn capabilities(&self) -> crate::Capabilities {
+        crate::Capabilities {
+            named_parameters: true,
+            positional_parameters: true,
+        }
+    }
+    fn execute(
+        &self,
+        request: quill_core::query::QueryRequest,
+    ) -> PoolFuture<'_, quill_core::query::QueryExecution> {
+        let client = self.client.clone();
+        Box::pin(async move {
+            Ok(crate::execution::start(move |sender, control| async move {
+                use clickhouse_ext_arrow::ArrowQueryExt;
+                use quill_core::query::QueryEvent;
+                let mut query = client.query(&request.sql);
+                for value in request.bindings.positional {
+                    query = Self::bind_parameter(query, None, value);
+                }
+                for (name, value) in request.bindings.named {
+                    query = Self::bind_parameter(query, Some(&name), value);
+                }
+                let mut cursor = query
+                    .fetch_arrow()
+                    .map_err(|e| Error::QueryExecution(Box::new(e)))?;
+                let mut schema_sent = false;
+                loop {
+                    let batch = cursor
+                        .next()
+                        .await
+                        .map_err(|e| Error::QueryExecution(Box::new(e)))?;
+                    if !schema_sent && let Some(schema) = cursor.schema() {
+                        control
+                            .send(
+                                &sender,
+                                QueryEvent::Schema {
+                                    result_set: 0,
+                                    schema,
+                                },
+                            )
+                            .await?;
+                        schema_sent = true;
+                    }
+                    let Some(batch) = batch else {
+                        break;
+                    };
+                    control
+                        .send(
+                            &sender,
+                            QueryEvent::Batch {
+                                result_set: 0,
+                                batch,
+                            },
+                        )
+                        .await?;
+                }
+                control
+                    .send(
+                        &sender,
+                        QueryEvent::ResultSetComplete {
+                            result_set: 0,
+                            affected_rows: None,
+                        },
+                    )
+                    .await?;
+                Ok(())
+            }))
+        })
+    }
     type Settings = ClickhouseSettings;
 
     fn list_catalogs(&self) -> PoolFuture<'_, Vec<CatalogRef>> {
@@ -194,5 +263,39 @@ impl ConnectionPool for ClickhouseConnectionPool {
             connection: "clickhouse".into(),
             source,
         })
+    }
+}
+
+impl ClickhouseConnectionPool {
+    fn bind_parameter(
+        mut query: clickhouse::query::Query,
+        name: Option<&str>,
+        value: quill_core::query::ParameterValue,
+    ) -> clickhouse::query::Query {
+        use quill_core::query::ParameterValue;
+        macro_rules! bind {
+            ($value:expr) => {
+                if let Some(name) = name {
+                    query.param(name, $value)
+                } else {
+                    query.bind($value)
+                }
+            };
+        }
+        query = match value {
+            ParameterValue::Null => bind!(Option::<String>::None),
+            ParameterValue::Boolean(v) => bind!(v),
+            ParameterValue::Int64(v) => bind!(v),
+            ParameterValue::UInt64(v) => bind!(v),
+            ParameterValue::Float64(v) => bind!(v),
+            ParameterValue::Text(v) => bind!(v),
+            ParameterValue::Binary(v) => bind!(v),
+            ParameterValue::Date(v) => bind!(v.to_string()),
+            ParameterValue::Time(v) => bind!(v.to_string()),
+            ParameterValue::Timestamp(v) => bind!(v.to_string()),
+            ParameterValue::TimestampWithTimezone(v) => bind!(v.to_rfc3339()),
+            ParameterValue::Uuid(v) => bind!(v.to_string()),
+        };
+        query
     }
 }
