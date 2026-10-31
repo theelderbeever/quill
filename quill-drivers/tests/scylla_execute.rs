@@ -2,7 +2,7 @@
 #[path = "support/execution.rs"]
 mod execution;
 
-use execution::{TestResult, failures, rows, tls};
+use execution::{TestResult, failures, metrics, rows, tls};
 use futures::StreamExt;
 use quill_core::query::*;
 use quill_drivers::{ConnectionPool, scylla::*};
@@ -21,7 +21,7 @@ async fn scylla_execution() -> TestResult {
     })
     .await?;
     assert!(pool.capabilities().named_parameters && pool.capabilities().positional_parameters);
-    pool.inner().query_unpaged("CREATE KEYSPACE IF NOT EXISTS quill_execution_test WITH replication = {'class':'SimpleStrategy','replication_factor':1}", ()).await?;
+    pool.inner().query_unpaged("CREATE KEYSPACE IF NOT EXISTS quill_execution_test WITH replication = {'class':'NetworkTopologyStrategy','replication_factor':1}", ()).await?;
     pool.inner()
         .query_unpaged(
             "CREATE TABLE quill_execution_test.items (id bigint PRIMARY KEY, value bigint)",
@@ -51,6 +51,15 @@ async fn scylla_execution() -> TestResult {
             .named
             .insert("id".into(), ParameterValue::Int64(1));
         rows(&pool, request, 1).await?;
+        let (_, measured) = metrics(
+            &pool,
+            QueryRequest::new("SELECT value FROM quill_execution_test.items"),
+        )
+        .await?;
+        let history = measured.client.driver.ok_or("Scylla records driver history")?;
+        assert!(history.requests >= 1 && history.attempts >= history.requests);
+        assert!(!history.nodes.is_empty());
+        assert_eq!(measured.server, None);
         let mut positional = QueryRequest::new("SELECT value FROM quill_execution_test.items WHERE id = ?");
         positional.bindings.positional.push(ParameterValue::Int64(1));
         rows(&pool, positional, 1).await?;

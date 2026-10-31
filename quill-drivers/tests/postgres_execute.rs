@@ -54,6 +54,13 @@ async fn parameters_streaming_empty_results_and_commands()
     let snapshot = execution.control.snapshot();
     assert_eq!(snapshot.status, ExecutionStatus::Completed);
     assert_eq!(snapshot.metrics.delivered_rows, 2500);
+    assert!(
+        snapshot
+            .metrics
+            .first_row
+            .is_some_and(|first| first <= snapshot.metrics.elapsed)
+    );
+    assert_eq!(pool.execution_metrics(execution.id).await?, None);
     for (sql, has_schema) in [
         ("SELECT 1 WHERE false", true),
         ("CREATE TEMP TABLE execution_fixture (id int)", false),

@@ -1,6 +1,9 @@
 mod metadata;
 use metadata::{ColumnRow, IndexRow, NameRow, SchemaRow, TableRow};
 
+mod query_log;
+use query_log::QueryLog;
+
 mod settings;
 pub use settings::ClickhouseSettings;
 
@@ -14,6 +17,8 @@ use secrecy::ExposeSecret;
 /// Official ClickHouse client backed by a reusable HTTP connection pool.
 pub struct ClickhouseConnectionPool {
     client: clickhouse::Client,
+    /// Chosen when connecting, from whether replica-wide reads work.
+    query_log: QueryLog,
 }
 
 impl ClickhouseConnectionPool {
@@ -57,63 +62,79 @@ impl ConnectionPool for ClickhouseConnectionPool {
     ) -> PoolFuture<'_, quill_core::query::QueryExecution> {
         let client = self.client.clone();
         Box::pin(async move {
-            Ok(crate::execution::start(move |sender, control| async move {
-                use clickhouse_ext_arrow::ArrowQueryExt;
-                use quill_core::query::QueryEvent;
-                let mut query = client.query(&request.sql);
-                for value in request.bindings.positional {
-                    query = Self::bind_parameter(query, None, value);
-                }
-                for (name, value) in request.bindings.named {
-                    query = Self::bind_parameter(query, Some(&name), value);
-                }
-                let mut cursor = query
-                    .fetch_arrow()
-                    .map_err(|e| Error::QueryExecution(Box::new(e)))?;
-                let mut schema_sent = false;
-                loop {
-                    let batch = cursor
-                        .next()
-                        .await
+            let id = quill_core::query::QueryId::new();
+            Ok(crate::execution::start_with_id(
+                id,
+                move |sender, control| async move {
+                    use clickhouse_ext_arrow::ArrowQueryExt;
+                    use quill_core::query::QueryEvent;
+                    let mut query = client
+                        .query(&request.sql)
+                        .with_setting("query_id", Self::server_query_id(id));
+                    for value in request.bindings.positional {
+                        query = Self::bind_parameter(query, None, value);
+                    }
+                    for (name, value) in request.bindings.named {
+                        query = Self::bind_parameter(query, Some(&name), value);
+                    }
+                    let mut cursor = query
+                        .fetch_arrow()
                         .map_err(|e| Error::QueryExecution(Box::new(e)))?;
-                    if !schema_sent && let Some(schema) = cursor.schema() {
+                    let mut schema_sent = false;
+                    loop {
+                        let batch = cursor
+                            .next()
+                            .await
+                            .map_err(|e| Error::QueryExecution(Box::new(e)))?;
+                        if !schema_sent && let Some(schema) = cursor.schema() {
+                            control
+                                .send(
+                                    &sender,
+                                    QueryEvent::Schema {
+                                        result_set: 0,
+                                        schema,
+                                    },
+                                )
+                                .await?;
+                            schema_sent = true;
+                        }
+                        let Some(batch) = batch else {
+                            break;
+                        };
                         control
                             .send(
                                 &sender,
-                                QueryEvent::Schema {
+                                QueryEvent::Batch {
                                     result_set: 0,
-                                    schema,
+                                    batch,
                                 },
                             )
                             .await?;
-                        schema_sent = true;
                     }
-                    let Some(batch) = batch else {
-                        break;
-                    };
                     control
                         .send(
                             &sender,
-                            QueryEvent::Batch {
+                            QueryEvent::ResultSetComplete {
                                 result_set: 0,
-                                batch,
+                                affected_rows: None,
                             },
                         )
                         .await?;
-                }
-                control
-                    .send(
-                        &sender,
-                        QueryEvent::ResultSetComplete {
-                            result_set: 0,
-                            affected_rows: None,
-                        },
-                    )
-                    .await?;
-                Ok(())
-            }))
+                    Ok(())
+                },
+            ))
         })
     }
+    /// Reads `system.query_log` across replicas when connecting found a usable
+    /// `{cluster}` macro, otherwise on the connected server. Returns `Ok(None)` until
+    /// the server flushes its log, by default within a few seconds.
+    fn execution_metrics(
+        &self,
+        id: quill_core::query::QueryId,
+    ) -> PoolFuture<'_, Option<quill_core::query::ServerMetrics>> {
+        Box::pin(self.logged_metrics(id))
+    }
+
     type Settings = ClickhouseSettings;
 
     fn list_catalogs(&self) -> PoolFuture<'_, Vec<CatalogRef>> {
@@ -255,8 +276,8 @@ impl ConnectionPool for ClickhouseConnectionPool {
             for (key, value) in &settings.params {
                 client = client.with_setting(key, value);
             }
-            client.query("SELECT 1").execute().await?;
-            let pool = Self { client };
+            let query_log = QueryLog::probe(&client).await?;
+            let pool = Self { client, query_log };
             Ok::<_, anyhow::Error>(pool)
         };
         connect.await.map_err(|source| Error::DriverConnect {

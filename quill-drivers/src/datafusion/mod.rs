@@ -7,11 +7,16 @@ pub use settings::{
     ObjectStoreSettings,
 };
 
-use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionContext};
+use datafusion::{
+    physical_plan::ExecutionPlan,
+    prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionContext},
+};
 use quill_core::{
     error::{Error, Result},
     metadata::*,
+    query::{QueryId, ServerMetrics},
 };
+use std::{sync::Arc, time::Duration};
 
 use crate::{ConnectionPool, PoolFuture};
 
@@ -19,6 +24,8 @@ use crate::{ConnectionPool, PoolFuture};
 /// The session owns its runtime, registered stores, and table catalog.
 pub struct DatafusionConnectionPool {
     inner: SessionContext,
+    /// Plan metrics for recently finished executions, bounded by `retained_metrics`.
+    metrics: moka::sync::Cache<QueryId, ServerMetrics>,
 }
 
 impl DatafusionConnectionPool {
@@ -38,64 +45,126 @@ impl DatafusionConnectionPool {
     }
 }
 
+impl DatafusionConnectionPool {
+    /// Aggregate operator metrics across the whole plan tree. Leaf output is what
+    /// the scans read; root output is what the query returned.
+    fn plan_metrics(plan: &Arc<dyn ExecutionPlan>) -> ServerMetrics {
+        fn add(total: &mut Option<u64>, value: Option<usize>) {
+            if let Some(value) = value {
+                *total = Some(total.unwrap_or(0) + value as u64);
+            }
+        }
+        let mut metrics = ServerMetrics {
+            result_rows: plan
+                .metrics()
+                .and_then(|set| set.output_rows())
+                .map(|rows| rows as u64),
+            ..ServerMetrics::unknown()
+        };
+        let mut compute_nanos = None;
+        let mut pending = vec![plan];
+        while let Some(node) = pending.pop() {
+            let children = node.children();
+            if let Some(set) = node.metrics() {
+                if children.is_empty() {
+                    add(&mut metrics.read_rows, set.output_rows());
+                }
+                add(
+                    &mut metrics.read_bytes,
+                    set.sum_by_name("bytes_scanned")
+                        .map(|value| value.as_usize()),
+                );
+                add(&mut metrics.spilled_bytes, set.spilled_bytes());
+                add(&mut compute_nanos, set.elapsed_compute());
+            }
+            pending.extend(children);
+        }
+        metrics.compute_time = compute_nanos.map(Duration::from_nanos);
+        metrics
+    }
+}
+
 impl ConnectionPool for DatafusionConnectionPool {
     fn execute(
         &self,
         request: quill_core::query::QueryRequest,
     ) -> PoolFuture<'_, quill_core::query::QueryExecution> {
         let client = self.inner.clone();
+        let retained = self.metrics.clone();
+        let id = QueryId::new();
         Box::pin(async move {
-            Ok(crate::execution::start(move |sender, control| async move {
-                use quill_core::query::QueryEvent;
-                if !request.bindings.named.is_empty() || !request.bindings.positional.is_empty() {
-                    return Err(Error::UnsupportedOperation("query parameters"));
-                }
-                use futures::TryStreamExt;
-                let frame = client
-                    .sql(&request.sql)
-                    .await
-                    .map_err(|e| Error::QueryExecution(Box::new(e)))?;
-                let mut stream = frame
-                    .execute_stream()
-                    .await
-                    .map_err(|e| Error::QueryExecution(Box::new(e)))?;
-                control
-                    .send(
-                        &sender,
-                        QueryEvent::Schema {
-                            result_set: 0,
-                            schema: stream.schema(),
-                        },
-                    )
-                    .await?;
-                while let Some(batch) = stream
-                    .try_next()
-                    .await
-                    .map_err(|e| Error::QueryExecution(Box::new(e)))?
-                {
-                    control
-                        .send(
-                            &sender,
-                            QueryEvent::Batch {
-                                result_set: 0,
-                                batch,
-                            },
-                        )
-                        .await?;
-                }
-                control
-                    .send(
-                        &sender,
-                        QueryEvent::ResultSetComplete {
-                            result_set: 0,
-                            affected_rows: None,
-                        },
-                    )
-                    .await?;
-                Ok(())
-            }))
+            Ok(crate::execution::start_with_id(
+                id,
+                move |sender, control| async move {
+                    use futures::TryStreamExt;
+                    use quill_core::query::QueryEvent;
+                    if !request.bindings.named.is_empty() || !request.bindings.positional.is_empty()
+                    {
+                        return Err(Error::UnsupportedOperation("query parameters"));
+                    }
+                    let frame = client
+                        .sql(&request.sql)
+                        .await
+                        .map_err(|e| Error::QueryExecution(Box::new(e)))?;
+                    let task = Arc::new(frame.task_ctx());
+                    let plan = frame
+                        .create_physical_plan()
+                        .await
+                        .map_err(|e| Error::QueryExecution(Box::new(e)))?;
+                    let stream = async {
+                        let mut stream =
+                            datafusion::physical_plan::execute_stream(plan.clone(), task)
+                                .map_err(|e| Error::QueryExecution(Box::new(e)))?;
+                        control
+                            .send(
+                                &sender,
+                                QueryEvent::Schema {
+                                    result_set: 0,
+                                    schema: stream.schema(),
+                                },
+                            )
+                            .await?;
+                        while let Some(batch) = stream
+                            .try_next()
+                            .await
+                            .map_err(|e| Error::QueryExecution(Box::new(e)))?
+                        {
+                            control
+                                .send(
+                                    &sender,
+                                    QueryEvent::Batch {
+                                        result_set: 0,
+                                        batch,
+                                    },
+                                )
+                                .await?;
+                        }
+                        control
+                            .send(
+                                &sender,
+                                QueryEvent::ResultSetComplete {
+                                    result_set: 0,
+                                    affected_rows: None,
+                                },
+                            )
+                            .await
+                    };
+                    // Failed executions keep the metrics gathered up to the failure.
+                    let result = stream.await;
+                    retained.insert(id, Self::plan_metrics(&plan));
+                    result
+                },
+            ))
         })
     }
+
+    /// Plan metrics are recorded when an execution completes or fails, and kept
+    /// for the most recent `retained_metrics` executions. Cancelled executions
+    /// record none.
+    fn execution_metrics(&self, id: QueryId) -> PoolFuture<'_, Option<ServerMetrics>> {
+        Box::pin(async move { Ok(self.metrics.get(&id)) })
+    }
+
     type Settings = DatafusionSettings;
 
     fn list_catalogs(&self) -> PoolFuture<'_, Vec<CatalogRef>> {
@@ -226,7 +295,15 @@ impl ConnectionPool for DatafusionConnectionPool {
                     }
                 }
             }
-            Ok::<_, anyhow::Error>(Self { inner })
+            Ok::<_, anyhow::Error>(Self {
+                inner,
+                // LRU rather than TinyLFU: each id is inserted once, and admission
+                // filtering would reject new entries once the cache is full.
+                metrics: moka::sync::Cache::builder()
+                    .max_capacity(settings.retained_metrics)
+                    .eviction_policy(moka::policy::EvictionPolicy::lru())
+                    .build(),
+            })
         };
         connect.await.map_err(|source| Error::DriverConnect {
             connection: "datafusion".into(),
@@ -238,7 +315,6 @@ impl ConnectionPool for DatafusionConnectionPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     #[tokio::test]
     async fn queries_tables_nested_under_a_local_store()
@@ -271,6 +347,7 @@ mod tests {
                     },
                 ],
             }],
+            retained_metrics: 1,
         };
         let pool = DatafusionConnectionPool::connect(&settings).await?;
         pool.inner()
