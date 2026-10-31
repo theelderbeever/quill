@@ -1,0 +1,19 @@
+[package]
+name = "quill-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+crossterm.workspace = true
+futures.workspace = true
+indexmap.workspace = true
+quill-core.workspace = true
+quill-drivers.workspace = true
+ratatui.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

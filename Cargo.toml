@@ -4,6 +4,7 @@ members = [
   "quill-core",
   "quill-drivers",
   "quill-io",
+  "quill-tui",
 ]
 
 resolver = "2"
@@ -17,6 +18,7 @@ rust-version = "1.99"
 quill-core = { path = "quill-core" }
 quill-drivers = { path = "quill-drivers" }
 quill-io = { path = "quill-io" }
+quill-tui = { path = "quill-tui" }
 
 anyhow = "1"
 arrow = { version = "59.2", default-features = false }
@@ -25,6 +27,7 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 clickhouse = { version = "0.15.3", features = ["native-tls"] }
 clickhouse-ext-arrow = "0.2"
+crossterm = { version = "0.29", features = ["event-stream"] }
 datafusion = "55.2"
 datafusion-table-providers = { version = "0.11", features = ["postgres"] }
 figment = { version = "0.10", features = ["env", "toml"] }
@@ -33,6 +36,7 @@ indexmap = { version = "2", features = ["serde"] }
 indoc = "2"
 moka = { version = "0.12", default-features = false, features = ["sync"] }
 pretty_assertions = "1"
+ratatui = "0.30"
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 sqlx = {
