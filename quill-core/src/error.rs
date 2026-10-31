@@ -7,6 +7,9 @@ pub enum Error {
     #[error("query execution failed")]
     QueryExecution(#[source] Box<dyn std::error::Error + Send + Sync>),
 
+    #[error(transparent)]
+    ServerMetrics(#[from] crate::query::ServerMetricsError),
+
     #[error("required metadata missing: {0}")]
     MissingMetadata(&'static str),
 

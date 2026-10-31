@@ -10,6 +10,7 @@ use url::Url;
 /// ```toml
 /// [connection.files]
 /// kind = "datafusion"
+/// retained_metrics = 256
 ///
 /// [[connection.files.object_stores]]
 /// kind = "local"
@@ -33,6 +34,16 @@ use url::Url;
 pub struct DatafusionSettings {
     #[serde(default)]
     pub object_stores: Vec<ObjectStoreSettings>,
+    /// Completed executions whose plan metrics remain available to
+    /// `execution_metrics`; least recently used entries are evicted first.
+    #[serde(default = "DatafusionSettings::default_retained_metrics")]
+    pub retained_metrics: u64,
+}
+
+impl DatafusionSettings {
+    const fn default_retained_metrics() -> u64 {
+        256
+    }
 }
 
 /// A store with named tables. Typed fields override `options`, which override

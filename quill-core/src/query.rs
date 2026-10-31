@@ -1,5 +1,8 @@
 use std::fmt;
 
+mod metrics;
+pub use metrics::{ClientMetrics, DriverHistory, QueryMetrics, ServerMetrics, ServerMetricsError};
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -130,35 +133,11 @@ pub enum ExecutionStatus {
     Cancelled,
 }
 
-/// Per-execution counters. Unknown measurements are absent rather than zero.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ExecutionMetrics {
-    /// Quill wall time, measured using `Instant::now()` and `start.elapsed()`.
-    /// Continues through streaming and freezes on any terminal status.
-    pub elapsed: std::time::Duration,
-    pub delivered_rows: u64,
-    pub delivered_batches: u64,
-    pub affected_rows: Option<u64>,
-    pub server_elapsed: Option<std::time::Duration>,
-    pub scanned_bytes: Option<u64>,
-    pub memory_bytes: Option<u64>,
-    pub warnings: Vec<String>,
-}
-
-/// Optional server measurements retrieved for one execution after submission.
-/// Absence may mean the server log has not been flushed yet.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ServerMetrics {
-    pub elapsed: Option<std::time::Duration>,
-    pub scanned_bytes: Option<u64>,
-    pub memory_bytes: Option<u64>,
-}
-
 /// An atomic observation of an execution's status and counters.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionSnapshot {
     pub status: ExecutionStatus,
-    pub metrics: ExecutionMetrics,
+    pub metrics: ClientMetrics,
 }
 
 /// Driver control for work spanning submission and streaming.

@@ -96,12 +96,16 @@ impl MysqlConnectionPool {
                     .collect::<Vec<_>>(),
             ));
             if !kinds.is_empty() {
-                sender
-                    .send(Ok(QueryEvent::Schema {
-                        result_set: 0,
-                        schema: schema.clone(),
-                    }))
-                    .await?;
+                control
+                    .send(
+                        sender,
+                        QueryEvent::Schema {
+                            result_set: 0,
+                            schema: schema.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(|_| ExecutionError::ConsumerClosed)?;
             }
             let mut rows = Vec::new();
             // SQLx's executor stream carries both rows and command completion.

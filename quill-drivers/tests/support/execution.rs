@@ -50,7 +50,32 @@ pub async fn rows(pool: &dyn ConnectionPool, request: QueryRequest, expected: us
     let snapshot = execution.control.snapshot();
     assert_eq!(snapshot.status, ExecutionStatus::Completed);
     assert_eq!(snapshot.metrics.delivered_rows, expected as u64);
+    assert_eq!(snapshot.metrics.first_row.is_some(), expected > 0);
     Ok(())
+}
+
+/// Drain one successful execution and combine its client counters with
+/// whatever server metrics the pool reports immediately afterwards.
+pub async fn metrics(
+    pool: &dyn ConnectionPool,
+    request: QueryRequest,
+) -> Result<(QueryId, QueryMetrics), Box<dyn std::error::Error>> {
+    let mut execution = pool.execute(request).await?;
+    while let Some(event) = execution.events.next().await {
+        event?;
+    }
+    let snapshot = execution.control.snapshot();
+    assert_eq!(snapshot.status, ExecutionStatus::Completed);
+    let client = snapshot.metrics;
+    if client.delivered_rows > 0 {
+        assert!(
+            client
+                .first_row
+                .is_some_and(|first| first <= client.elapsed)
+        );
+    }
+    let server = pool.execution_metrics(execution.id).await?;
+    Ok((execution.id, QueryMetrics { client, server }))
 }
 
 pub async fn nulls(pool: &dyn ConnectionPool, sql: &str) -> TestResult {

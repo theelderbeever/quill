@@ -2,7 +2,7 @@
 #[path = "support/execution.rs"]
 mod execution;
 
-use execution::{TestResult, failures, nulls, rows, tls};
+use execution::{TestResult, failures, metrics, nulls, rows, tls};
 use quill_core::query::*;
 use quill_drivers::{ConnectionPool, mysql::*};
 
@@ -27,6 +27,9 @@ async fn mysql_execution() -> TestResult {
     request.bindings.positional.push(ParameterValue::Int64(42));
     rows(&pool, request, 2500).await?;
     nulls(&pool, "SELECT CAST(NULL AS SIGNED)").await?;
+    let (_, measured) = metrics(&pool, QueryRequest::new("SELECT CAST(42 AS SIGNED)")).await?;
+    assert_eq!(measured.client.delivered_rows, 1);
+    assert_eq!(measured.server, None);
     rows(
         &pool,
         QueryRequest::new("SELECT CAST(42 AS SIGNED) WHERE false"),

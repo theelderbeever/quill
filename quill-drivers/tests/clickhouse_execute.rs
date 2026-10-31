@@ -2,14 +2,12 @@
 #[path = "support/execution.rs"]
 mod execution;
 
-use execution::{TestResult, failures, nulls, rows, tls};
+use execution::{TestResult, failures, metrics, nulls, rows, tls};
 use quill_core::query::*;
 use quill_drivers::{ConnectionPool, clickhouse::*};
 
-#[tokio::test]
-#[ignore = "requires Docker Compose ClickHouse"]
-async fn clickhouse_execution() -> TestResult {
-    let pool = ClickhouseConnectionPool::connect(&ClickhouseSettings {
+fn settings(user: &str) -> ClickhouseSettings {
+    ClickhouseSettings {
         host: if tls().is_some() {
             "localhost:8443"
         } else {
@@ -17,12 +15,17 @@ async fn clickhouse_execution() -> TestResult {
         }
         .into(),
         database: "default".into(),
-        user: Some("quill".into()),
+        user: Some(user.into()),
         password: Some("password".into()),
         tls: tls(),
         params: Default::default(),
-    })
-    .await?;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker Compose ClickHouse"]
+async fn clickhouse_execution() -> TestResult {
+    let pool = ClickhouseConnectionPool::connect(&settings("quill")).await?;
     assert!(pool.capabilities().named_parameters && pool.capabilities().positional_parameters);
     let mut request =
         QueryRequest::new("SELECT CAST(? + {offset:Int64} AS Int64) AS bound FROM numbers(2500)");
@@ -63,4 +66,85 @@ async fn clickhouse_execution() -> TestResult {
         "SELECT toInt64(42) FROM numbers(100000)",
     )
     .await
+}
+
+#[tokio::test]
+#[ignore = "requires Docker Compose ClickHouse"]
+async fn clickhouse_server_metrics() -> TestResult {
+    // The connect-time log probe must not mask authentication failures.
+    let mut wrong_password = settings("quill");
+    wrong_password.password = Some("wrong".into());
+    assert!(
+        ClickhouseConnectionPool::connect(&wrong_password)
+            .await
+            .is_err()
+    );
+    let pool = ClickhouseConnectionPool::connect(&settings("quill")).await?;
+    let flush = || pool.inner().query("SYSTEM FLUSH LOGS").execute();
+    let (select, measured) = metrics(
+        &pool,
+        QueryRequest::new("SELECT toInt64(42) FROM numbers(2500)"),
+    )
+    .await?;
+    assert_eq!(measured.client.delivered_rows, 2500);
+    flush().await?;
+    let server = pool
+        .execution_metrics(select)
+        .await?
+        .ok_or("flushed query log has the execution")?;
+    assert!(server.read_rows.is_some_and(|rows| rows >= 2500));
+    assert_eq!(server.result_rows, Some(2500));
+    assert!(server.elapsed.is_some() && server.peak_memory_bytes.is_some());
+    assert_eq!(pool.execution_metrics(QueryId::new()).await?, None);
+
+    pool.inner()
+        .query("CREATE OR REPLACE TABLE quill_metrics_insert (n UInt64) ENGINE = Memory")
+        .execute()
+        .await?;
+    let result = async {
+        let (insert, _) = metrics(
+            &pool,
+            QueryRequest::new("INSERT INTO quill_metrics_insert SELECT number FROM numbers(100)"),
+        )
+        .await?;
+        flush().await?;
+        let server = pool
+            .execution_metrics(insert)
+            .await?
+            .ok_or("flushed query log has the insert")?;
+        assert_eq!(server.written_rows, Some(100));
+        Ok::<_, Box<dyn std::error::Error>>(())
+    }
+    .await;
+    pool.inner()
+        .query("DROP TABLE quill_metrics_insert")
+        .execute()
+        .await?;
+    result?;
+
+    pool.inner()
+        .query("CREATE USER OR REPLACE quill_metrics_denied IDENTIFIED BY 'password'")
+        .execute()
+        .await?;
+    let denied = async {
+        let restricted =
+            ClickhouseConnectionPool::connect(&settings("quill_metrics_denied")).await?;
+        let outcome = restricted.execution_metrics(QueryId::new()).await;
+        assert!(
+            matches!(
+                outcome,
+                Err(quill_core::error::Error::ServerMetrics(
+                    ServerMetricsError::PermissionDenied(_)
+                ))
+            ),
+            "{outcome:?}"
+        );
+        Ok::<_, Box<dyn std::error::Error>>(())
+    }
+    .await;
+    pool.inner()
+        .query("DROP USER quill_metrics_denied")
+        .execute()
+        .await?;
+    denied
 }

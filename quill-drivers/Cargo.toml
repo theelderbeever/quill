@@ -19,6 +19,7 @@ clickhouse-ext-arrow.workspace = true
 datafusion.workspace = true
 hyper-tls = "0.6"
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+moka.workspace = true
 native-tls = "0.2"
 object_store = {
   version = "0.13.2",

@@ -58,16 +58,26 @@ pub trait ConnectionPool: Send + Sync {
         Box::pin(async { Err(Error::UnsupportedOperation("execute query")) })
     }
 
-    /// Retrieve optional server measurements for this execution only.
-    /// Call again later if asynchronous server logs have not appeared yet.
-    /// Local timing and counters remain available through execution control,
-    /// including when a driver has no server measurements.
+    /// Retrieve server measurements for this execution only.
+    ///
+    /// `Ok(None)` means none are recorded yet; servers with asynchronous logs
+    /// may publish them later, so call again. Drivers without server metrics
+    /// always return `Ok(None)`. Live client counters remain available through
+    /// execution control either way.
     ///
     /// ```no_run
-    /// # async fn inspect(pool: &dyn quill_drivers::ConnectionPool, id: quill_core::query::QueryId) -> quill_core::error::Result<()> {
-    /// let metrics = pool.execution_metrics(id).await?;
-    /// # Ok(())
-    /// # }
+    /// use quill_core::{error::Error, query::{QueryId, ServerMetricsError}};
+    ///
+    /// async fn inspect(pool: &dyn quill_drivers::ConnectionPool, id: QueryId) {
+    ///     match pool.execution_metrics(id).await {
+    ///         Ok(Some(metrics)) => println!("read {:?} rows", metrics.read_rows),
+    ///         Ok(None) => println!("not recorded yet"),
+    ///         Err(Error::ServerMetrics(ServerMetricsError::PermissionDenied(_))) => {
+    ///             println!("grant access to the server's query log")
+    ///         }
+    ///         Err(error) => println!("{error}"),
+    ///     }
+    /// }
     /// ```
     fn execution_metrics(
         &self,

@@ -1,8 +1,6 @@
 //! Single-statement Postgres execution using native extended-protocol bindings.
-use std::{
-    sync::{Arc, Mutex},
-    time::Instant,
-};
+use crate::execution::Control;
+use std::sync::Arc;
 
 use arrow::{
     array::*,
@@ -18,7 +16,7 @@ use sqlx::{
     Column, Executor, Row, Statement, TypeInfo,
     postgres::{PgArguments, PgRow},
 };
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::sync::mpsc;
 
 use super::PostgresConnectionPool;
 
@@ -54,92 +52,12 @@ impl<T> From<mpsc::error::SendError<T>> for ExecutionError {
 
 type ExecutionResult<T> = std::result::Result<T, ExecutionError>;
 
-struct Control {
-    start: Instant,
-    state: Mutex<ExecutionSnapshot>,
-    task: Mutex<Option<JoinHandle<()>>>,
-}
-
-impl Control {
-    fn finish(&self, status: ExecutionStatus) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.status == ExecutionStatus::Running {
-            state.status = status;
-            state.metrics.elapsed = self.start.elapsed();
-        }
-    }
-}
-
-impl ExecutionControl for Control {
-    fn cancel(&self) {
-        self.finish(ExecutionStatus::Cancelled);
-        if let Some(task) = self.task.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-            task.abort();
-        }
-    }
-    fn snapshot(&self) -> ExecutionSnapshot {
-        let mut snapshot = self.state.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if snapshot.status == ExecutionStatus::Running {
-            snapshot.metrics.elapsed = self.start.elapsed();
-        }
-        snapshot
-    }
-}
-
-// Also finalize status when a task panics or is aborted outside cancellation.
-struct TaskLifetime(Arc<Control>);
-impl Drop for TaskLifetime {
-    fn drop(&mut self) {
-        self.0.finish(ExecutionStatus::Failed);
-    }
-}
-
 impl PostgresConnectionPool {
     pub(super) fn start_execution(&self, request: QueryRequest) -> QueryExecution {
-        let control = Arc::new(Control {
-            start: Instant::now(),
-            state: Mutex::new(ExecutionSnapshot {
-                status: ExecutionStatus::Running,
-                metrics: ExecutionMetrics {
-                    elapsed: std::time::Duration::ZERO,
-                    delivered_rows: 0,
-                    delivered_batches: 0,
-                    affected_rows: None,
-                    server_elapsed: None,
-                    scanned_bytes: None,
-                    memory_bytes: None,
-                    warnings: Vec::new(),
-                },
-            }),
-            task: Mutex::new(None),
-        });
-        // One pending event bounds memory and keeps the producer tied to consumption.
-        let (sender, receiver) = mpsc::channel(1);
         let pool = self.inner.clone();
-        let task_control = control.clone();
-        let task = tokio::spawn(async move {
-            let _lifetime = TaskLifetime(task_control.clone());
-            let result = Self::run(&pool, request, &sender, &task_control).await;
-            match result {
-                Ok(()) => {
-                    task_control.finish(ExecutionStatus::Completed);
-                    let _ = sender.send(Ok(QueryEvent::Complete)).await;
-                }
-                Err(error) => {
-                    task_control.finish(ExecutionStatus::Failed);
-                    let _ = sender.send(Err(error)).await;
-                }
-            }
-        });
-        *control.task.lock().unwrap_or_else(|e| e.into_inner()) = Some(task);
-        let events = futures::stream::unfold(receiver, |mut receiver| async move {
-            receiver.recv().await.map(|event| (event, receiver))
-        });
-        QueryExecution {
-            id: QueryId::new(),
-            events: Box::pin(events),
-            control,
-        }
+        crate::execution::start(move |sender, control| async move {
+            Self::run(&pool, request, &sender, &control).await
+        })
     }
 
     async fn run(
@@ -209,12 +127,16 @@ impl PostgresConnectionPool {
                     .collect::<Vec<_>>(),
             ));
             if !kinds.is_empty() {
-                sender
-                    .send(Ok(QueryEvent::Schema {
-                        result_set: 0,
-                        schema: schema.clone(),
-                    }))
-                    .await?;
+                control
+                    .send(
+                        sender,
+                        QueryEvent::Schema {
+                            result_set: 0,
+                            schema: schema.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(|_| ExecutionError::ConsumerClosed)?;
             }
             let mut rows = Vec::new();
             // SQLx's executor stream carries both rows and command completion.
@@ -236,18 +158,16 @@ impl PostgresConnectionPool {
                         } else {
                             None
                         };
-                        if let Some(affected) = affected_rows {
-                            let mut state = control.state.lock().unwrap_or_else(|e| e.into_inner());
-                            if state.status == ExecutionStatus::Running {
-                                state.metrics.affected_rows = Some(affected);
-                            }
-                        }
-                        sender
-                            .send(Ok(QueryEvent::ResultSetComplete {
-                                result_set: 0,
-                                affected_rows,
-                            }))
-                            .await?;
+                        control
+                            .send(
+                                sender,
+                                QueryEvent::ResultSetComplete {
+                                    result_set: 0,
+                                    affected_rows,
+                                },
+                            )
+                            .await
+                            .map_err(|_| ExecutionError::ConsumerClosed)?;
                     }
                 }
             }
@@ -270,20 +190,16 @@ impl PostgresConnectionPool {
             .map(|(index, kind)| kind.array(rows, index))
             .collect::<ExecutionResult<Vec<_>>>()?;
         let batch = RecordBatch::try_new(schema.clone(), arrays)?;
-        let count = batch.num_rows() as u64;
-        let permit = sender.reserve().await?;
-        {
-            let mut state = control.state.lock().unwrap_or_else(|e| e.into_inner());
-            if state.status != ExecutionStatus::Running {
-                return Ok(());
-            }
-            state.metrics.delivered_rows += count;
-            state.metrics.delivered_batches += 1;
-            permit.send(Ok(QueryEvent::Batch {
-                result_set: 0,
-                batch,
-            }));
-        }
+        control
+            .send(
+                sender,
+                QueryEvent::Batch {
+                    result_set: 0,
+                    batch,
+                },
+            )
+            .await
+            .map_err(|_| ExecutionError::ConsumerClosed)?;
         rows.clear();
         Ok(())
     }

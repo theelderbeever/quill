@@ -1,6 +1,9 @@
 mod metadata;
 use metadata::{ColumnRow, IndexRow, NameRow, SchemaRow, TableRow};
 
+mod query_log;
+use query_log::QueryLog;
+
 mod settings;
 pub use settings::ClickhouseSettings;
 
@@ -14,6 +17,8 @@ use secrecy::ExposeSecret;
 /// Official ClickHouse client backed by a reusable HTTP connection pool.
 pub struct ClickhouseConnectionPool {
     client: clickhouse::Client,
+    /// Chosen when connecting, from whether replica-wide reads work.
+    query_log: QueryLog,
 }
 
 impl ClickhouseConnectionPool {
@@ -65,7 +70,7 @@ impl ConnectionPool for ClickhouseConnectionPool {
                     use quill_core::query::QueryEvent;
                     let mut query = client
                         .query(&request.sql)
-                        .with_setting("query_id", format!("quill::{id}"));
+                        .with_setting("query_id", Self::server_query_id(id));
                     for value in request.bindings.positional {
                         query = Self::bind_parameter(query, None, value);
                     }
@@ -120,30 +125,14 @@ impl ConnectionPool for ClickhouseConnectionPool {
             ))
         })
     }
+    /// Reads `system.query_log` across replicas when connecting found a usable
+    /// `{cluster}` macro, otherwise on the connected server. Returns `Ok(None)` until
+    /// the server flushes its log, by default within a few seconds.
     fn execution_metrics(
         &self,
         id: quill_core::query::QueryId,
     ) -> PoolFuture<'_, Option<quill_core::query::ServerMetrics>> {
-        Box::pin(async move {
-            #[derive(serde::Deserialize, clickhouse::Row)]
-            struct MetricsRow {
-                query_duration_ms: u64,
-                read_bytes: u64,
-                memory_usage: u64,
-            }
-            let rows = self.client.query(
-                "SELECT query_duration_ms, read_bytes, toUInt64(greatest(memory_usage, 0)) AS memory_usage FROM system.query_log WHERE query_id = ? AND type IN ('QueryFinish', 'ExceptionWhileProcessing') ORDER BY event_time_microseconds DESC LIMIT 1"
-            ).bind(format!("quill::{id}")).fetch_all::<MetricsRow>().await
-                .map_err(|e| Error::QueryExecution(Box::new(e)))?;
-            Ok(rows
-                .into_iter()
-                .next()
-                .map(|row| quill_core::query::ServerMetrics {
-                    elapsed: Some(std::time::Duration::from_millis(row.query_duration_ms)),
-                    scanned_bytes: Some(row.read_bytes),
-                    memory_bytes: Some(row.memory_usage),
-                }))
-        })
+        Box::pin(self.logged_metrics(id))
     }
 
     type Settings = ClickhouseSettings;
@@ -287,8 +276,8 @@ impl ConnectionPool for ClickhouseConnectionPool {
             for (key, value) in &settings.params {
                 client = client.with_setting(key, value);
             }
-            client.query("SELECT 1").execute().await?;
-            let pool = Self { client };
+            let query_log = QueryLog::probe(&client).await?;
+            let pool = Self { client, query_log };
             Ok::<_, anyhow::Error>(pool)
         };
         connect.await.map_err(|source| Error::DriverConnect {

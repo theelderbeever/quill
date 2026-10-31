@@ -1,9 +1,8 @@
 [workspace]
-
 members = [
-    "quill",
-    "quill-core",
-    "quill-drivers",
+  "quill",
+  "quill-core",
+  "quill-drivers",
 ]
 
 resolver = "2"
@@ -13,57 +12,60 @@ version = "0.1.0-alpha.0"
 edition = "2024"
 rust-version = "1.99"
 
-[workspace.lints]
-
-[workspace.lints.rust]
-unsafe_code = "forbid"
-
-[workspace.lints.clippy]
-all = "warn"
-print_stdout = "warn"
-unwrap_used = "warn"
-expect_used = "warn"
-complexity = { level = "warn", priority = -1 }
-
 [workspace.dependencies]
 quill-core = { path = "quill-core" }
 quill-drivers = { path = "quill-drivers" }
 
+anyhow = "1"
 arrow = { version = "59.2", default-features = false }
-datafusion = "55.2"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
 clickhouse = { version = "0.15.3", features = ["native-tls"] }
 clickhouse-ext-arrow = "0.2"
-figment = { version = "0.10", features = ["toml", "env"] }
+datafusion = "55.2"
 datafusion-table-providers = { version = "0.11", features = ["postgres"] }
-tracing = { version = "0.1.44", features = ["async-await"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-opentelemetry = { version = "0.28", features = ["thiserror"] }
-tokio = { version = "1", features = ["full"] }
-anyhow = "1"
-clap = { version = "4", features = ["derive"] }
-pretty_assertions = "1"
-thiserror = "2"
+figment = { version = "0.10", features = ["env", "toml"] }
 futures = "0.3"
 indexmap = { version = "2", features = ["serde"] }
 indoc = "2"
-url = { version = "2.5", features = ["serde"] }
-sqlx = { version = "0.8", features = [
-    "uuid",
-    "postgres",
-    "runtime-tokio-rustls",
+moka = { version = "0.12", default-features = false, features = ["sync"] }
+pretty_assertions = "1"
+secrecy = { version = "0.10.3", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+sqlx = {
+  version = "0.8",
+  features = [
+    "bigdecimal",
     "chrono",
+    "derive",
     "json",
     "macros",
     "migrate",
-    "derive",
-    "bigdecimal",
-] }
-chrono = { version = "0.4", features = ["serde"] }
-secrecy = { version = "0.10.3", features = ["serde"] }
-serde = { version = "1", features = ["derive"] }
+    "postgres",
+    "runtime-tokio-rustls",
+    "uuid",
+  ]
+}
 tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
 toml = "0.8"
-uuid = { version = "1", features = ["v4", "serde"] }
+tracing = { version = "0.1.44", features = ["async-await"] }
+tracing-opentelemetry = { version = "0.28", features = ["thiserror"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = { version = "2.5", features = ["serde"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[workspace.lints]
+[workspace.lints.clippy]
+all = "warn"
+complexity = { level = "warn", priority = -1 }
+expect_used = "warn"
+print_stdout = "warn"
+unwrap_used = "warn"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
 
 [profile.dev]
 debug = "line-tables-only"
@@ -72,4 +74,4 @@ debug = "line-tables-only"
 debug = false
 
 [profile.release]
-strip = 'symbols'
+strip = "symbols"

@@ -7,10 +7,72 @@ use arrow::{
 use futures::TryStreamExt;
 use quill_core::query::*;
 use scylla::{
+    errors::{RequestAttemptError, RequestError},
     frame::response::result::{ColumnType, NativeType},
+    observability::history::{AttemptId, HistoryListener, RequestId, SpeculativeId},
+    policies::retry::RetryDecision,
     value::{CqlValue, Row},
 };
 use std::sync::Arc;
+/// Records each request, speculative fiber, and attempt into live client
+/// metrics, so retries are visible while a query is still paging.
+struct HistoryCounter(Arc<crate::execution::Control>);
+
+impl HistoryCounter {
+    fn update(&self, update: impl FnOnce(&mut DriverHistory) -> usize) -> usize {
+        let mut id = 0;
+        self.0.record(|metrics| {
+            let history = metrics.driver.get_or_insert_with(|| DriverHistory {
+                requests: 0,
+                attempts: 0,
+                speculative_executions: 0,
+                nodes: Vec::new(),
+            });
+            id = update(history);
+        });
+        id
+    }
+}
+
+impl std::fmt::Debug for HistoryCounter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HistoryCounter")
+    }
+}
+
+impl HistoryListener for HistoryCounter {
+    fn log_request_start(&self) -> RequestId {
+        RequestId(self.update(|history| {
+            history.requests += 1;
+            history.requests as usize
+        }))
+    }
+    fn log_request_success(&self, _: RequestId) {}
+    fn log_request_error(&self, _: RequestId, _: &RequestError) {}
+    fn log_new_speculative_fiber(&self, _: RequestId) -> SpeculativeId {
+        SpeculativeId(self.update(|history| {
+            history.speculative_executions += 1;
+            history.speculative_executions as usize
+        }))
+    }
+    fn log_attempt_start(
+        &self,
+        _: RequestId,
+        _: Option<SpeculativeId>,
+        node: std::net::SocketAddr,
+    ) -> AttemptId {
+        AttemptId(self.update(|history| {
+            history.attempts += 1;
+            if !history.nodes.contains(&node) {
+                history.nodes.push(node);
+            }
+            history.attempts as usize
+        }))
+    }
+    fn log_attempt_success(&self, _: AttemptId) {}
+    fn log_attempt_error(&self, _: AttemptId, _: &RequestAttemptError, _: &RetryDecision) {}
+}
+
 impl ScyllaConnectionPool {
     pub(super) async fn run(
         session: Arc<Session>,
@@ -18,10 +80,11 @@ impl ScyllaConnectionPool {
         sender: tokio::sync::mpsc::Sender<Result<QueryEvent>>,
         control: Arc<crate::execution::Control>,
     ) -> Result<()> {
-        let statement = session
+        let mut statement = session
             .prepare(request.sql)
             .await
             .map_err(|e| Error::QueryExecution(Box::new(e)))?;
+        statement.set_history_listener(Arc::new(HistoryCounter(control.clone())));
         let named = request
             .bindings
             .named

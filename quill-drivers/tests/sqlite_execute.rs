@@ -2,7 +2,7 @@
 #[path = "support/execution.rs"]
 mod execution;
 
-use execution::{TestResult, failures, nulls, rows};
+use execution::{TestResult, failures, metrics, nulls, rows};
 use quill_core::query::*;
 use quill_drivers::{ConnectionPool, sqlite::*};
 
@@ -20,5 +20,8 @@ async fn sqlite_execution() -> TestResult {
     rows(&pool, request, 2500).await?;
     rows(&pool, QueryRequest::new("SELECT 42 WHERE false"), 0).await?;
     nulls(&pool, "SELECT CAST(NULL AS INTEGER)").await?;
+    let (_, measured) = metrics(&pool, QueryRequest::new("SELECT 42")).await?;
+    assert_eq!(measured.client.delivered_rows, 1);
+    assert_eq!(measured.server, None);
     failures(&pool, "SELECT missing_execution_column", "SELECT 42").await
 }

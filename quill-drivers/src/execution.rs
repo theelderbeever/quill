@@ -68,16 +68,7 @@ where
         start: Instant::now(),
         state: Mutex::new(ExecutionSnapshot {
             status: ExecutionStatus::Running,
-            metrics: ExecutionMetrics {
-                elapsed: std::time::Duration::ZERO,
-                delivered_rows: 0,
-                delivered_batches: 0,
-                affected_rows: None,
-                server_elapsed: None,
-                scanned_bytes: None,
-                memory_bytes: None,
-                warnings: Vec::new(),
-            },
+            metrics: ClientMetrics::started(),
         }),
         task: Mutex::new(None),
     });
@@ -110,6 +101,7 @@ where
 }
 
 impl Control {
+    /// Deliver one event, counting it only while the execution is still running.
     pub(crate) async fn send(
         &self,
         sender: &mpsc::Sender<Result<QueryEvent>>,
@@ -119,24 +111,37 @@ impl Control {
             .reserve()
             .await
             .map_err(|_| Error::QueryExecution(Box::new(ConsumerClosed)))?;
-        if let QueryEvent::Batch { ref batch, .. } = event {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.metrics.delivered_rows += batch.num_rows() as u64;
-            state.metrics.delivered_batches += 1;
-        }
-        if let QueryEvent::ResultSetComplete {
-            affected_rows: Some(affected),
-            ..
-        } = &event
         {
-            self.state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .metrics
-                .affected_rows = Some(*affected);
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.status != ExecutionStatus::Running {
+                return Ok(());
+            }
+            let metrics = &mut state.metrics;
+            match &event {
+                QueryEvent::Batch { batch, .. } => {
+                    if batch.num_rows() > 0 && metrics.first_row.is_none() {
+                        metrics.first_row = Some(self.start.elapsed());
+                    }
+                    metrics.delivered_rows += batch.num_rows() as u64;
+                    metrics.delivered_batches += 1;
+                }
+                QueryEvent::ResultSetComplete {
+                    affected_rows: Some(affected),
+                    ..
+                } => metrics.affected_rows = Some(*affected),
+                _ => {}
+            }
         }
         permit.send(Ok(event));
         Ok(())
+    }
+
+    /// Update driver-specific client metrics while the execution is still running.
+    pub(crate) fn record(&self, update: impl FnOnce(&mut ClientMetrics)) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.status == ExecutionStatus::Running {
+            update(&mut state.metrics);
+        }
     }
 }
 
@@ -155,6 +160,60 @@ mod tests {
         assert_eq!(snapshot.status, ExecutionStatus::Completed);
         execution.control.cancel();
         assert_eq!(execution.control.snapshot(), snapshot);
+    }
+
+    fn batch(rows: i64) -> QueryEvent {
+        let values = arrow::array::Int64Array::from_iter_values(0..rows);
+        QueryEvent::Batch {
+            result_set: 0,
+            batch: arrow::record_batch::RecordBatch::try_from_iter([(
+                "v",
+                Arc::new(values) as arrow::array::ArrayRef,
+            )])
+            .unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn first_row_waits_for_rows_and_is_set_once() {
+        let mut execution = start(|sender, control| async move {
+            control.send(&sender, batch(0)).await?;
+            assert_eq!(control.snapshot().metrics.first_row, None);
+            control.send(&sender, batch(2)).await?;
+            let first = control.snapshot().metrics.first_row;
+            assert!(first.is_some());
+            control.send(&sender, batch(3)).await?;
+            assert_eq!(control.snapshot().metrics.first_row, first);
+            Ok(())
+        });
+        while execution.events.try_next().await.unwrap().is_some() {}
+        let metrics = execution.control.snapshot().metrics;
+        assert_eq!(metrics.delivered_rows, 5);
+        assert_eq!(metrics.delivered_batches, 3);
+        assert!(
+            metrics
+                .first_row
+                .is_some_and(|first| first <= metrics.elapsed)
+        );
+    }
+
+    #[tokio::test]
+    async fn rowless_results_have_no_first_row() {
+        let mut execution = start(|sender, control| async move {
+            control
+                .send(
+                    &sender,
+                    QueryEvent::ResultSetComplete {
+                        result_set: 0,
+                        affected_rows: Some(4),
+                    },
+                )
+                .await
+        });
+        while execution.events.try_next().await.unwrap().is_some() {}
+        let metrics = execution.control.snapshot().metrics;
+        assert_eq!(metrics.first_row, None);
+        assert_eq!(metrics.affected_rows, Some(4));
     }
 
     #[tokio::test]

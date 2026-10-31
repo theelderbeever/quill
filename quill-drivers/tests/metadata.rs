@@ -164,7 +164,7 @@ async fn scylla_metadata() -> std::result::Result<(), Box<dyn std::error::Error>
         params: Default::default(),
     })
     .await?;
-    pool.inner().query_unpaged("CREATE KEYSPACE quill_metadata_test WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}", ()).await?;
+    pool.inner().query_unpaged("CREATE KEYSPACE quill_metadata_test WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1}", ()).await?;
     let result = async {
         pool.inner()
             .query_unpaged(
