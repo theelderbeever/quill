@@ -364,24 +364,15 @@ impl ColumnKind {
         }
     }
     fn array(self, rows: &[PgRow], index: usize) -> ExecutionResult<ArrayRef> {
-        macro_rules! primitive {
-            ($ty:ty, $array:ty) => {
-                Arc::new(
-                    rows.iter()
-                        .map(|r| r.try_get::<Option<$ty>, _>(index))
-                        .collect::<std::result::Result<$array, _>>()?,
-                ) as ArrayRef
-            };
-        }
         Ok(match self {
-            Self::Bool => primitive!(bool, BooleanArray),
-            Self::Int16 => primitive!(i16, Int16Array),
-            Self::Int32 => primitive!(i32, Int32Array),
-            Self::Int64 => primitive!(i64, Int64Array),
-            Self::Float32 => primitive!(f32, Float32Array),
-            Self::Float64 => primitive!(f64, Float64Array),
-            Self::Text => primitive!(&str, StringArray),
-            Self::Binary => primitive!(&[u8], BinaryArray),
+            Self::Bool => crate::macros::primitive!(rows, index, bool, BooleanArray),
+            Self::Int16 => crate::macros::primitive!(rows, index, i16, Int16Array),
+            Self::Int32 => crate::macros::primitive!(rows, index, i32, Int32Array),
+            Self::Int64 => crate::macros::primitive!(rows, index, i64, Int64Array),
+            Self::Float32 => crate::macros::primitive!(rows, index, f32, Float32Array),
+            Self::Float64 => crate::macros::primitive!(rows, index, f64, Float64Array),
+            Self::Text => crate::macros::primitive!(rows, index, &str, StringArray),
+            Self::Binary => crate::macros::primitive!(rows, index, &[u8], BinaryArray),
             Self::Date => {
                 let epoch = chrono::NaiveDate::default();
                 Arc::new(
