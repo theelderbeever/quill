@@ -3,7 +3,8 @@ use metadata::ColumnField;
 
 mod settings;
 pub use settings::{
-    DatafusionSettings, FileFormat, FileTableSettings, ObjectStoreProvider, ObjectStoreSettings,
+    DatafusionSettings, FileFormat, FileTableSettings, ObjectStoreBuildError, ObjectStoreProvider,
+    ObjectStoreSettings,
 };
 
 use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionContext};
@@ -26,7 +27,7 @@ impl DatafusionConnectionPool {
     /// ```no_run
     /// use quill_drivers::datafusion::DatafusionConnectionPool;
     ///
-    /// async fn query(pool: &DatafusionConnectionPool) -> anyhow::Result<()> {
+    /// async fn query(pool: &DatafusionConnectionPool) -> std::result::Result<(), Box<dyn std::error::Error>> {
     ///     let frame = pool.inner().sql("SELECT 1").await?;
     ///     let stream = frame.execute_stream().await?;
     ///     Ok(())
@@ -183,7 +184,8 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn queries_tables_nested_under_a_local_store() -> anyhow::Result<()> {
+    async fn queries_tables_nested_under_a_local_store()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
         let csv = root.path().join("csv");
         let json = root.path().join("json");

@@ -35,8 +35,8 @@ pub(super) struct IndexRow {
 }
 
 impl TryFrom<IndexRow> for IndexMetadata {
-    type Error = anyhow::Error;
-    fn try_from(row: IndexRow) -> anyhow::Result<Self> {
+    type Error = quill_core::error::Error;
+    fn try_from(row: IndexRow) -> quill_core::error::Result<Self> {
         let IndexRow {
             index_name: name,
             kind,
@@ -44,7 +44,7 @@ impl TryFrom<IndexRow> for IndexMetadata {
         } = row;
         let target = options
             .get("target")
-            .ok_or_else(|| anyhow::anyhow!("index target missing"))?;
+            .ok_or_else(|| quill_core::error::Error::MissingMetadata("index target"))?;
         Ok(IndexMetadata {
             name,
             access_method: options.get("class_name").cloned().unwrap_or(kind),

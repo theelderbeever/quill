@@ -3,6 +3,7 @@ use std::{future::Future, pin::Pin};
 use quill_core::{
     error::{Error, Result},
     metadata::{CatalogRef, IndexMetadata, SchemaRef, TableMetadata, TableRef},
+    query::{QueryExecution, QueryRequest},
 };
 
 /// A borrowed, sendable future usable through dynamic dispatch.
@@ -34,6 +35,27 @@ pub trait ConnectionPool: Send + Sync {
             named_parameters: false,
             positional_parameters: false,
         }
+    }
+
+    /// Begin executing native SQL without rewriting its placeholders.
+    ///
+    /// The returned execution owns work through the end of streaming. Drivers
+    /// start timing and spawn query work before returning it; submission errors
+    /// after that point are reported through the event stream.
+    ///
+    /// ```no_run
+    /// use quill_core::{error::Result, query::{QueryRequest, ParameterValue}};
+    /// use quill_drivers::ConnectionPool;
+    /// async fn execute(pool: &dyn ConnectionPool) -> Result<()> {
+    ///     let mut request = QueryRequest::new("SELECT $1");
+    ///     request.bindings.positional.push(ParameterValue::Int64(42));
+    ///     let execution = pool.execute(request).await?;
+    ///     let snapshot = execution.control.snapshot();
+    ///     Ok(())
+    /// }
+    /// ```
+    fn execute(&self, _request: QueryRequest) -> PoolFuture<'_, QueryExecution> {
+        Box::pin(async { Err(Error::UnsupportedOperation("execute query")) })
     }
 
     /// List catalogs visible to this connection.

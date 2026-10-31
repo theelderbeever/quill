@@ -87,18 +87,27 @@ pub enum ObjectStoreProvider {
 impl ObjectStoreSettings {
     pub(super) fn build(
         &self,
-    ) -> anyhow::Result<(Url, std::sync::Arc<dyn object_store::ObjectStore>)> {
+    ) -> std::result::Result<
+        (Url, std::sync::Arc<dyn object_store::ObjectStore>),
+        ObjectStoreBuildError,
+    > {
         use secrecy::ExposeSecret;
         match &self.provider {
             ObjectStoreProvider::Local { path } => {
-                anyhow::ensure!(
-                    self.options.is_empty(),
-                    "local stores do not accept provider options"
-                );
+                if !(self.options.is_empty()) {
+                    return Err(ObjectStoreBuildError::InvalidConfiguration(
+                        "local stores do not accept provider options",
+                    ));
+                }
                 let path = std::fs::canonicalize(path)?;
-                anyhow::ensure!(path.is_dir(), "local store path must be a directory");
-                let url = Url::from_directory_path(path)
-                    .map_err(|_| anyhow::anyhow!("invalid local directory"))?;
+                if !(path.is_dir()) {
+                    return Err(ObjectStoreBuildError::InvalidConfiguration(
+                        "local store path must be a directory",
+                    ));
+                }
+                let url = Url::from_directory_path(path).map_err(|_| {
+                    ObjectStoreBuildError::InvalidConfiguration("invalid local directory")
+                })?;
                 Ok((
                     url,
                     std::sync::Arc::new(object_store::local::LocalFileSystem::new()),
@@ -114,18 +123,21 @@ impl ObjectStoreSettings {
                 session_token,
                 allow_http,
             } => {
-                anyhow::ensure!(
-                    url.path().trim_matches('/').is_empty()
-                        && url.query().is_none()
-                        && url.fragment().is_none()
-                        && url.username().is_empty()
-                        && url.password().is_none(),
-                    "cloud store URL must contain only a scheme and authority"
-                );
-                anyhow::ensure!(
-                    matches!(url.scheme(), "s3" | "s3a"),
-                    "URL scheme does not match provider"
-                );
+                if !(url.path().trim_matches('/').is_empty()
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+                    && url.username().is_empty()
+                    && url.password().is_none())
+                {
+                    return Err(ObjectStoreBuildError::InvalidConfiguration(
+                        "cloud store URL must contain only a scheme and authority",
+                    ));
+                }
+                if !(matches!(url.scheme(), "s3" | "s3a")) {
+                    return Err(ObjectStoreBuildError::InvalidConfiguration(
+                        "URL scheme does not match provider",
+                    ));
+                }
                 let mut builder = if *from_env {
                     object_store::aws::AmazonS3Builder::from_env()
                 } else {
@@ -166,18 +178,21 @@ impl ObjectStoreSettings {
                 sas_token,
                 allow_http,
             } => {
-                anyhow::ensure!(
-                    url.path().trim_matches('/').is_empty()
-                        && url.query().is_none()
-                        && url.fragment().is_none()
-                        && url.username().is_empty()
-                        && url.password().is_none(),
-                    "cloud store URL must contain only a scheme and authority"
-                );
-                anyhow::ensure!(
-                    matches!(url.scheme(), "az" | "azure" | "abfs" | "abfss"),
-                    "URL scheme does not match provider"
-                );
+                if !(url.path().trim_matches('/').is_empty()
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+                    && url.username().is_empty()
+                    && url.password().is_none())
+                {
+                    return Err(ObjectStoreBuildError::InvalidConfiguration(
+                        "cloud store URL must contain only a scheme and authority",
+                    ));
+                }
+                if !(matches!(url.scheme(), "az" | "azure" | "abfs" | "abfss")) {
+                    return Err(ObjectStoreBuildError::InvalidConfiguration(
+                        "URL scheme does not match provider",
+                    ));
+                }
                 let mut builder = if *from_env {
                     object_store::azure::MicrosoftAzureBuilder::from_env()
                 } else {
@@ -210,15 +225,21 @@ impl ObjectStoreSettings {
                 service_account_path,
                 service_account_key,
             } => {
-                anyhow::ensure!(
-                    url.path().trim_matches('/').is_empty()
-                        && url.query().is_none()
-                        && url.fragment().is_none()
-                        && url.username().is_empty()
-                        && url.password().is_none(),
-                    "cloud store URL must contain only a scheme and authority"
-                );
-                anyhow::ensure!(url.scheme() == "gs", "URL scheme does not match provider");
+                if !(url.path().trim_matches('/').is_empty()
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+                    && url.username().is_empty()
+                    && url.password().is_none())
+                {
+                    return Err(ObjectStoreBuildError::InvalidConfiguration(
+                        "cloud store URL must contain only a scheme and authority",
+                    ));
+                }
+                if !(url.scheme() == "gs") {
+                    return Err(ObjectStoreBuildError::InvalidConfiguration(
+                        "URL scheme does not match provider",
+                    ));
+                }
                 let mut builder = if *from_env {
                     object_store::gcp::GoogleCloudStorageBuilder::from_env()
                 } else {
@@ -266,7 +287,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_provider_fields_and_nested_tables() -> anyhow::Result<()> {
+    fn parses_provider_fields_and_nested_tables()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let config: DatafusionSettings = toml::from_str(
             r#"
             [[object_stores]]
@@ -289,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_provider_options() -> anyhow::Result<()> {
+    fn rejects_unknown_provider_options() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let store: ObjectStoreSettings = toml::from_str(
             r#"
             kind = "aws"
@@ -300,4 +322,15 @@ mod tests {
         assert!(store.build().is_err());
         Ok(())
     }
+}
+
+/// Failures establishing a configured object store.
+#[derive(Debug, thiserror::Error)]
+pub enum ObjectStoreBuildError {
+    #[error("invalid object store configuration: {0}")]
+    InvalidConfiguration(&'static str),
+    #[error("object store directory access failed")]
+    Io(#[from] std::io::Error),
+    #[error("object store configuration or construction failed")]
+    Store(#[from] object_store::Error),
 }

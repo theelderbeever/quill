@@ -33,6 +33,12 @@ MySQL, ClickHouse, and Scylla, including missing-table errors. They use the loca
 CA in `docker/tls/certs/ca.pem` for the services configured with TLS. Postgres uses
 plaintext in the current Compose setup.
 
+Postgres query execution tests use the same Compose Postgres service:
+
+```sh
+cargo test -p quill-drivers --test postgres_execute -- --ignored
+```
+
 ### Compose without TLS
 
 Start only the base configuration:

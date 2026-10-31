@@ -143,7 +143,8 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn discovers_columns_and_indexes() -> anyhow::Result<()> {
+    async fn discovers_columns_and_indexes() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
         let pool = SqliteConnectionPool::connect(&SqliteSettings {
             path: ":memory:".into(),
             params: Default::default(),

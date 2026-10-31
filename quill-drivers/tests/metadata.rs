@@ -23,7 +23,7 @@ async fn discover(
     pool: &dyn ConnectionPool,
     schema_name: &str,
     table_name: &str,
-) -> anyhow::Result<TableRef> {
+) -> std::result::Result<TableRef, Box<dyn std::error::Error>> {
     for catalog in pool.list_catalogs().await? {
         for schema in pool.list_schemas(&catalog).await? {
             if schema.name == schema_name {
@@ -32,7 +32,7 @@ async fn discover(
                     .await?
                     .into_iter()
                     .find(|t| t.name == table_name)
-                    .ok_or_else(|| anyhow::anyhow!("fixture table not discovered"))?;
+                    .ok_or("fixture table not discovered")?;
                 let description = pool.describe_table(&table).await?;
                 assert_eq!(description.columns.len(), 2);
                 assert_eq!(description.columns[0].name, "id");
@@ -45,12 +45,12 @@ async fn discover(
             }
         }
     }
-    anyhow::bail!("fixture schema not discovered")
+    Err("fixture schema not discovered".into())
 }
 
 #[tokio::test]
 #[ignore = "requires Docker Compose Postgres"]
-async fn postgres_metadata() -> anyhow::Result<()> {
+async fn postgres_metadata() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let pool = PostgresConnectionPool::connect(&PostgresSettings {
         host: "localhost".into(),
         port: 5432,
@@ -70,12 +70,12 @@ async fn postgres_metadata() -> anyhow::Result<()> {
         let table = discover(&pool, "quill_metadata_test", "items").await?;
         let indexes = pool.list_indexes(&table).await?;
         assert_eq!(indexes.len(), 2);
-        let index = indexes.iter().find(|i| i.name == "title_idx").ok_or_else(|| anyhow::anyhow!("missing index"))?;
+        let index = indexes.iter().find(|i| i.name == "title_idx").ok_or("missing index")?;
         assert!(matches!(index.keys[0].source, IndexKeySource::Expression(_)));
         assert!(index.keys[0].ordering.is_some_and(|o| o.descending));
         assert_eq!(index.included_columns, ["id"]);
         assert!(index.predicate.is_some());
-        Ok::<_, anyhow::Error>(())
+        Ok::<_, Box<dyn std::error::Error>>(())
     }.await;
     sqlx::query("DROP SCHEMA quill_metadata_test CASCADE")
         .execute(pool.inner())
@@ -85,7 +85,7 @@ async fn postgres_metadata() -> anyhow::Result<()> {
 
 #[tokio::test]
 #[ignore = "requires Docker Compose MySQL"]
-async fn mysql_metadata() -> anyhow::Result<()> {
+async fn mysql_metadata() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let pool = MysqlConnectionPool::connect(&MysqlSettings {
         host: "localhost".into(),
         port: 3306,
@@ -105,9 +105,9 @@ async fn mysql_metadata() -> anyhow::Result<()> {
         let index = indexes
             .iter()
             .find(|i| i.name == "title_idx")
-            .ok_or_else(|| anyhow::anyhow!("missing index"))?;
+            .ok_or("missing index")?;
         assert!(index.keys[0].ordering.is_some_and(|o| o.descending));
-        Ok::<_, anyhow::Error>(())
+        Ok::<_, Box<dyn std::error::Error>>(())
     }
     .await;
     sqlx::query("DROP TABLE quill_metadata_items")
@@ -118,7 +118,7 @@ async fn mysql_metadata() -> anyhow::Result<()> {
 
 #[tokio::test]
 #[ignore = "requires Docker Compose ClickHouse"]
-async fn clickhouse_metadata() -> anyhow::Result<()> {
+async fn clickhouse_metadata() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let pool = ClickhouseConnectionPool::connect(&ClickhouseSettings {
         host: if tls().is_some() {
             "localhost:8443"
@@ -141,7 +141,7 @@ async fn clickhouse_metadata() -> anyhow::Result<()> {
         let indexes = pool.list_indexes(&table).await?;
         assert_eq!(indexes.len(), 1);
         assert_eq!(indexes[0].name, "title_idx");
-        Ok::<_, anyhow::Error>(())
+        Ok::<_, Box<dyn std::error::Error>>(())
     }
     .await;
     pool.inner()
@@ -153,7 +153,7 @@ async fn clickhouse_metadata() -> anyhow::Result<()> {
 
 #[tokio::test]
 #[ignore = "requires Docker Compose Scylla"]
-async fn scylla_metadata() -> anyhow::Result<()> {
+async fn scylla_metadata() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let pool = ScyllaConnectionPool::connect(&ScyllaSettings {
         nodes: vec!["localhost:9042".into()],
         keyspace: None,
@@ -182,7 +182,7 @@ async fn scylla_metadata() -> anyhow::Result<()> {
         let indexes = pool.list_indexes(&table).await?;
         assert_eq!(indexes.len(), 1);
         assert_eq!(indexes[0].name, "title_idx");
-        Ok::<_, anyhow::Error>(())
+        Ok::<_, Box<dyn std::error::Error>>(())
     }
     .await;
     pool.inner()

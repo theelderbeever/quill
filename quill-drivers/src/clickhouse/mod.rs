@@ -29,7 +29,7 @@ impl ClickhouseConnectionPool {
     /// ```no_run
     /// use quill_drivers::clickhouse::ClickhouseConnectionPool;
     ///
-    /// async fn first_batch(pool: &ClickhouseConnectionPool) -> anyhow::Result<()> {
+    /// async fn first_batch(pool: &ClickhouseConnectionPool) -> std::result::Result<(), Box<dyn std::error::Error>> {
     ///     let mut cursor = pool.query_arrow("SELECT 1")?;
     ///     let batch: Option<arrow::record_batch::RecordBatch> = cursor.next().await?;
     ///     Ok(())
