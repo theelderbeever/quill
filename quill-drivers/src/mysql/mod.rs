@@ -1,3 +1,4 @@
+mod execute;
 mod metadata;
 use metadata::{ColumnRow, IndexRow, NameRow, SchemaRow, TableRow};
 
@@ -28,6 +29,18 @@ impl MysqlConnectionPool {
 }
 
 impl ConnectionPool for MysqlConnectionPool {
+    fn capabilities(&self) -> crate::Capabilities {
+        crate::Capabilities {
+            named_parameters: false,
+            positional_parameters: true,
+        }
+    }
+    fn execute(
+        &self,
+        request: quill_core::query::QueryRequest,
+    ) -> PoolFuture<'_, quill_core::query::QueryExecution> {
+        Box::pin(async move { Ok(self.start_execution(request)) })
+    }
     type Settings = MysqlSettings;
 
     fn list_catalogs(&self) -> PoolFuture<'_, Vec<CatalogRef>> {

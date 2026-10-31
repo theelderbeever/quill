@@ -1,3 +1,4 @@
+mod execute;
 mod metadata;
 use metadata::{ColumnRow, IndexRow, NameRow, SchemaRow, TableRow};
 
@@ -14,7 +15,7 @@ use secrecy::ExposeSecret;
 
 /// Native Scylla session, which manages the cluster's connection pools.
 pub struct ScyllaConnectionPool {
-    inner: Session,
+    inner: std::sync::Arc<Session>,
 }
 
 impl ScyllaConnectionPool {
@@ -25,6 +26,23 @@ impl ScyllaConnectionPool {
 }
 
 impl ConnectionPool for ScyllaConnectionPool {
+    fn capabilities(&self) -> crate::Capabilities {
+        crate::Capabilities {
+            named_parameters: true,
+            positional_parameters: true,
+        }
+    }
+    fn execute(
+        &self,
+        request: quill_core::query::QueryRequest,
+    ) -> PoolFuture<'_, quill_core::query::QueryExecution> {
+        let session = self.inner.clone();
+        Box::pin(async move {
+            Ok(crate::execution::start(move |sender, control| async move {
+                Self::run(session, request, sender, control).await
+            }))
+        })
+    }
     type Settings = ScyllaSettings;
 
     fn list_catalogs(&self) -> PoolFuture<'_, Vec<CatalogRef>> {
@@ -188,7 +206,9 @@ impl ConnectionPool for ScyllaConnectionPool {
             if let Some(keyspace) = &settings.keyspace {
                 inner.use_keyspace(keyspace, true).await?;
             }
-            Ok::<_, anyhow::Error>(Self { inner })
+            Ok::<_, anyhow::Error>(Self {
+                inner: std::sync::Arc::new(inner),
+            })
         };
         connect.await.map_err(|source| Error::DriverConnect {
             connection: "scylla".into(),

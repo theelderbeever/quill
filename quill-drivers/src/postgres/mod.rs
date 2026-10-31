@@ -1,3 +1,6 @@
+pub use execute::ExecutionError;
+mod decimal;
+mod execute;
 mod metadata;
 use metadata::{ColumnRow, IndexRow, NameRow, SchemaRow, TableRow};
 
@@ -31,6 +34,20 @@ impl PostgresConnectionPool {
 
 impl ConnectionPool for PostgresConnectionPool {
     type Settings = PostgresSettings;
+
+    fn capabilities(&self) -> crate::Capabilities {
+        crate::Capabilities {
+            named_parameters: false,
+            positional_parameters: true,
+        }
+    }
+
+    fn execute(
+        &self,
+        request: quill_core::query::QueryRequest,
+    ) -> PoolFuture<'_, quill_core::query::QueryExecution> {
+        Box::pin(async move { Ok(self.start_execution(request)) })
+    }
 
     // PostgreSQL connections can inspect only their current database.
     fn list_catalogs(&self) -> PoolFuture<'_, Vec<CatalogRef>> {

@@ -1,3 +1,4 @@
+mod execute;
 mod metadata;
 use metadata::{ColumnRow, IndexKeyRow, IndexRow, NameRow, SchemaRow, TableRow};
 
@@ -24,6 +25,18 @@ impl SqliteConnectionPool {
 }
 
 impl ConnectionPool for SqliteConnectionPool {
+    fn capabilities(&self) -> crate::Capabilities {
+        crate::Capabilities {
+            named_parameters: false,
+            positional_parameters: true,
+        }
+    }
+    fn execute(
+        &self,
+        request: quill_core::query::QueryRequest,
+    ) -> PoolFuture<'_, quill_core::query::QueryExecution> {
+        Box::pin(async move { Ok(self.start_execution(request)) })
+    }
     type Settings = SqliteSettings;
 
     /// SQLite has one connection-local catalog; attached databases are schemas.
@@ -143,7 +156,8 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn discovers_columns_and_indexes() -> anyhow::Result<()> {
+    async fn discovers_columns_and_indexes() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
         let pool = SqliteConnectionPool::connect(&SqliteSettings {
             path: ":memory:".into(),
             params: Default::default(),

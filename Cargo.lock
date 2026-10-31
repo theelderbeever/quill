@@ -562,8 +562,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -3074,6 +3076,9 @@ name = "quill-core"
 version = "0.1.0-alpha.0"
 dependencies = [
  "anyhow",
+ "arrow",
+ "chrono",
+ "futures",
  "pretty_assertions",
  "secrecy",
  "serde",
@@ -3090,9 +3095,11 @@ version = "0.1.0-alpha.0"
 dependencies = [
  "anyhow",
  "arrow",
+ "chrono",
  "clickhouse",
  "clickhouse-ext-arrow",
  "datafusion",
+ "futures",
  "hyper-tls",
  "hyper-util",
  "native-tls",
@@ -3104,6 +3111,7 @@ dependencies = [
  "serde",
  "sqlx",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-native-tls",
  "toml",

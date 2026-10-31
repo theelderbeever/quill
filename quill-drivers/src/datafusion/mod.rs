@@ -3,7 +3,8 @@ use metadata::ColumnField;
 
 mod settings;
 pub use settings::{
-    DatafusionSettings, FileFormat, FileTableSettings, ObjectStoreProvider, ObjectStoreSettings,
+    DatafusionSettings, FileFormat, FileTableSettings, ObjectStoreBuildError, ObjectStoreProvider,
+    ObjectStoreSettings,
 };
 
 use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionContext};
@@ -26,7 +27,7 @@ impl DatafusionConnectionPool {
     /// ```no_run
     /// use quill_drivers::datafusion::DatafusionConnectionPool;
     ///
-    /// async fn query(pool: &DatafusionConnectionPool) -> anyhow::Result<()> {
+    /// async fn query(pool: &DatafusionConnectionPool) -> std::result::Result<(), Box<dyn std::error::Error>> {
     ///     let frame = pool.inner().sql("SELECT 1").await?;
     ///     let stream = frame.execute_stream().await?;
     ///     Ok(())
@@ -38,6 +39,63 @@ impl DatafusionConnectionPool {
 }
 
 impl ConnectionPool for DatafusionConnectionPool {
+    fn execute(
+        &self,
+        request: quill_core::query::QueryRequest,
+    ) -> PoolFuture<'_, quill_core::query::QueryExecution> {
+        let client = self.inner.clone();
+        Box::pin(async move {
+            Ok(crate::execution::start(move |sender, control| async move {
+                use quill_core::query::QueryEvent;
+                if !request.bindings.named.is_empty() || !request.bindings.positional.is_empty() {
+                    return Err(Error::UnsupportedOperation("query parameters"));
+                }
+                use futures::TryStreamExt;
+                let frame = client
+                    .sql(&request.sql)
+                    .await
+                    .map_err(|e| Error::QueryExecution(Box::new(e)))?;
+                let mut stream = frame
+                    .execute_stream()
+                    .await
+                    .map_err(|e| Error::QueryExecution(Box::new(e)))?;
+                control
+                    .send(
+                        &sender,
+                        QueryEvent::Schema {
+                            result_set: 0,
+                            schema: stream.schema(),
+                        },
+                    )
+                    .await?;
+                while let Some(batch) = stream
+                    .try_next()
+                    .await
+                    .map_err(|e| Error::QueryExecution(Box::new(e)))?
+                {
+                    control
+                        .send(
+                            &sender,
+                            QueryEvent::Batch {
+                                result_set: 0,
+                                batch,
+                            },
+                        )
+                        .await?;
+                }
+                control
+                    .send(
+                        &sender,
+                        QueryEvent::ResultSetComplete {
+                            result_set: 0,
+                            affected_rows: None,
+                        },
+                    )
+                    .await?;
+                Ok(())
+            }))
+        })
+    }
     type Settings = DatafusionSettings;
 
     fn list_catalogs(&self) -> PoolFuture<'_, Vec<CatalogRef>> {
@@ -183,7 +241,8 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn queries_tables_nested_under_a_local_store() -> anyhow::Result<()> {
+    async fn queries_tables_nested_under_a_local_store()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
         let csv = root.path().join("csv");
         let json = root.path().join("json");

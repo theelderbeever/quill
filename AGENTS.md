@@ -11,7 +11,7 @@
   the only way to establish it, not in a comment re-checked at each use. Consider a `String`
   which cannot be empty, construct `NonEmptyString`. A newtype that removes no invariant is ceremony.
 - Do not derive `Default` for a type whose empty or zero value carries a domain meaning.
-- Do not derive both `Serialize/Deserialize` for a type which is not reversible. 
+- Do not derive both `Serialize/Deserialize` for a type which is not reversible.
   Derive only the intended variant.
 - Prefer generic library seams over application-specific duplication, but do not add
   clever abstractions without a demonstrated need.
@@ -19,8 +19,9 @@
   `quill/src/lib.rs` and the generated configuration schema.
 - Public interfaces should include useful doctests. Keep comments terse and focused on
   constraints or reasoning the code cannot express.
-- Keep secrets secret even in memory. A database password should never be exposed in logs or elsewhere. 
+- Keep secrets secret even in memory. A database password should never be exposed in logs or elsewhere.
   Carry `SecretString` around until the exact location it needs used.
+- Do not use `anyhow::Result` anywhere except `quill` or `quill-tui`. Library crates always return actionable error types.
 
 ## Crates
 

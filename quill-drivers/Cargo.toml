@@ -5,29 +5,35 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-quill-core = { workspace = true }
 anyhow = { workspace = true }
+chrono.workspace = true
+futures.workspace = true
+quill-core = { workspace = true }
 secrecy = { workspace = true }
+thiserror.workspace = true
 tokio = { workspace = true }
 
-sqlx = { workspace = true, features = ["mysql", "sqlite"] }
+arrow.workspace = true
 clickhouse.workspace = true
 clickhouse-ext-arrow.workspace = true
-arrow.workspace = true
 datafusion.workspace = true
-object_store = { version = "0.13.2", features = ["aws", "azure", "gcp", "http"] }
-hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 hyper-tls = "0.6"
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 native-tls = "0.2"
-tokio-native-tls = "0.3"
-scylla = { version = "1.9", features = ["openssl-010"] }
+object_store = {
+  version = "0.13.2",
+  features = ["aws", "azure", "gcp", "http"]
+}
 openssl = "0.10"
+scylla = { version = "1.9", features = ["openssl-010"] }
 serde.workspace = true
+sqlx = { workspace = true, features = ["mysql", "sqlite"] }
+tokio-native-tls = "0.3"
 url = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-toml.workspace = true
-tempfile.workspace = true

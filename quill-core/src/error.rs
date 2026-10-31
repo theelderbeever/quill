@@ -4,6 +4,12 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("query execution failed")]
+    QueryExecution(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("required metadata missing: {0}")]
+    MissingMetadata(&'static str),
+
     #[error("operation is not supported: {0}")]
     UnsupportedOperation(&'static str),
 
