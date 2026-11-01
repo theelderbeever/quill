@@ -32,7 +32,7 @@ impl Header<'_> {
             .map(Span::raw)
             .flat_map(|crumb| [Span::styled(" › ", theme::DIM), crumb])
             .skip(1);
-        let Some(name) = self.view.connection() else {
+        let Some(id) = self.view.connection() else {
             return vec![
                 Line::styled("quill", theme::TITLE),
                 Line::styled(
@@ -42,7 +42,7 @@ impl Header<'_> {
                 Line::from("connections"),
             ];
         };
-        let status = self.connections.state(name).map_or(Span::raw(""), |state| {
+        let status = self.connections.state(id).map_or(Span::raw(""), |state| {
             let style = match state {
                 ConnectionState::Idle => theme::DIM,
                 ConnectionState::Connecting => theme::PENDING,
@@ -53,12 +53,13 @@ impl Header<'_> {
         });
         vec![
             Line::from(vec![
-                Span::styled(name.as_str(), theme::TITLE),
+                Span::styled(id.name(), theme::TITLE),
                 Span::styled(" · ", theme::DIM),
-                Span::raw(self.connections.kind(name)),
+                Span::raw(self.connections.kind(id)),
             ]),
             Line::from(status),
             Line::from_iter(breadcrumb),
+            Line::styled(self.connections.label(id), theme::DIM),
         ]
     }
 

@@ -4,11 +4,15 @@ mod queries;
 pub mod workspace;
 
 use crossterm::event::{KeyEvent, MouseEvent};
-use ratatui::{Frame, layout::Rect};
+use ratatui::{Frame, layout::Rect, text::Line};
 
 use crate::{
     component::{Component, Context, KeyHint, KeyOutcome},
-    connection::ConnectionName,
+    connection::{ConnectionId, Target},
+    event::Msg,
+    filter::Filter,
+    store::queries::QueryName,
+    widget::palette::{Flash, Mode},
 };
 use connections::ConnectionsView;
 use queries::QueriesView;
@@ -16,18 +20,28 @@ use workspace::Workspace;
 
 /// Where a view sits in the navigation hierarchy.
 pub enum Route {
-    Connections,
-    Queries(ConnectionName),
+    Connections(Option<Filter>),
+    Queries(ConnectionId),
     Workspace {
-        connection: ConnectionName,
-        query: String,
+        connection: ConnectionId,
+        query: QueryName,
     },
 }
 
 impl Route {
-    pub const fn connection(&self) -> Option<&ConnectionName> {
+    /// Where a resolved bare name leads: its queries, or the connection
+    /// list narrowed to every match.
+    pub fn target(target: Option<Target>) -> Self {
+        match target {
+            None => Self::Connections(None),
+            Some(Target::One(id)) => Self::Queries(id),
+            Some(Target::Many(filter)) => Self::Connections(Some(filter)),
+        }
+    }
+
+    pub const fn connection(&self) -> Option<&ConnectionId> {
         match self {
-            Self::Connections => None,
+            Self::Connections(_) => None,
             Self::Queries(connection) | Self::Workspace { connection, .. } => Some(connection),
         }
     }
@@ -36,21 +50,21 @@ impl Route {
 pub enum View {
     Connections(ConnectionsView),
     Queries(QueriesView),
-    Workspace(Workspace),
+    Workspace(Box<Workspace>),
 }
 
 impl View {
-    pub fn open(route: Route) -> Self {
-        match route {
-            Route::Connections => Self::Connections(ConnectionsView::new()),
-            Route::Queries(connection) => Self::Queries(QueriesView::new(connection)),
+    pub fn open(route: Route, ctx: &Context) -> anyhow::Result<Self> {
+        Ok(match route {
+            Route::Connections(filter) => Self::Connections(ConnectionsView::new(filter)),
+            Route::Queries(connection) => Self::Queries(QueriesView::open(connection, ctx)?),
             Route::Workspace { connection, query } => {
-                Self::Workspace(Workspace::new(connection, query))
+                Self::Workspace(Box::new(Workspace::open(connection, query, ctx)?))
             }
-        }
+        })
     }
 
-    pub fn connection(&self) -> Option<&ConnectionName> {
+    pub fn connection(&self) -> Option<&ConnectionId> {
         match self {
             Self::Connections(_) => None,
             Self::Queries(view) => Some(view.connection()),
@@ -61,20 +75,71 @@ impl View {
     /// Path to this view, e.g. `pg_prod › daily_revenue`.
     pub fn breadcrumb(&self) -> impl Iterator<Item = &str> {
         let query = match self {
-            Self::Workspace(view) => Some(view.query()),
+            Self::Workspace(view) => Some(view.query().as_str()),
             _ => None,
         };
         self.connection()
-            .map(ConnectionName::as_str)
+            .map(ConnectionId::name)
             .into_iter()
             .chain(query)
+    }
+
+    /// What `/` edits here, with the current text: a live list filter or
+    /// a results condition.
+    pub fn filter_mode(&self) -> Option<(Mode, &str)> {
+        match self {
+            Self::Connections(_) | Self::Queries(_) => Some((Mode::Filter, "")),
+            Self::Workspace(view) => view.filter().map(|text| (Mode::Where, text)),
+        }
+    }
+
+    /// Narrow a list view. Returns false for views without a list.
+    pub fn set_filter(&mut self, filter: Option<Filter>) -> bool {
+        match self {
+            Self::Connections(view) => view.set_filter(filter),
+            Self::Queries(view) => view.set_filter(filter),
+            Self::Workspace(_) => return false,
+        }
+        true
+    }
+
+    /// Flush state before the view is left: saves an open query.
+    pub fn close(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Workspace(view) => view.close(),
+            _ => Ok(()),
+        }
+    }
+
+    /// Called on each redraw tick. Returns whether the screen should redraw.
+    pub fn tick(&mut self, ctx: &Context) -> anyhow::Result<bool> {
+        match self {
+            Self::Workspace(view) => view.tick(ctx),
+            _ => Ok(false),
+        }
+    }
+
+    /// Apply a background update. Returns a message to show, if any.
+    pub fn handle_msg(&mut self, msg: Msg, ctx: &Context) -> Option<Flash> {
+        match self {
+            Self::Workspace(view) => view.handle_msg(msg, ctx),
+            _ => None,
+        }
+    }
+
+    /// Shown on the palette line while the palette is closed.
+    pub fn status(&self) -> Option<Line<'_>> {
+        match self {
+            Self::Workspace(view) => view.status(),
+            _ => None,
+        }
     }
 
     fn component(&mut self) -> &mut dyn Component {
         match self {
             Self::Connections(view) => view,
             Self::Queries(view) => view,
-            Self::Workspace(view) => view,
+            Self::Workspace(view) => view.as_mut(),
         }
     }
 }
@@ -100,6 +165,10 @@ impl Component for View {
         }
     }
 
+    fn copy_text(&mut self) -> Option<String> {
+        self.component().copy_text()
+    }
+
     fn captures_input(&self) -> bool {
         match self {
             Self::Connections(view) => view.captures_input(),
@@ -118,7 +187,7 @@ pub struct ViewStack {
 impl ViewStack {
     pub fn new() -> Self {
         Self {
-            root: View::open(Route::Connections),
+            root: View::Connections(ConnectionsView::new(None)),
             above: Vec::new(),
         }
     }
@@ -131,54 +200,21 @@ impl ViewStack {
         self.above.last_mut().unwrap_or(&mut self.root)
     }
 
-    pub fn push(&mut self, route: Route) {
-        match route {
-            Route::Connections => self.above.clear(),
-            route => self.above.push(View::open(route)),
-        }
+    pub fn push(&mut self, view: View) {
+        self.above.push(view);
     }
 
-    /// Pop the top view; the connection list stays.
-    pub fn pop(&mut self) {
-        self.above.pop();
+    /// Remove the top view, leaving the connection list.
+    pub fn pop(&mut self) -> Option<View> {
+        self.above.pop()
     }
 
-    pub fn jump(&mut self, route: Route) {
-        self.above.clear();
-        self.push(route);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::connection::testing::connections;
-
-    fn crumbs(stack: &ViewStack) -> Vec<&str> {
-        stack.top().breadcrumb().collect()
-    }
-
-    #[test]
-    fn navigates_down_back_and_jumps() {
-        let connections = connections(&["a", "b"]);
-        let a = connections.resolve("a").cloned().unwrap();
-        let b = connections.resolve("b").cloned().unwrap();
-        let mut stack = ViewStack::new();
-        assert!(crumbs(&stack).is_empty());
-
-        stack.pop();
-        assert!(matches!(stack.top(), View::Connections(_)));
-
-        stack.push(Route::Queries(a.clone()));
-        stack.push(Route::Workspace {
-            connection: a,
-            query: "daily".into(),
-        });
-        assert_eq!(crumbs(&stack), ["a", "daily"]);
-
-        stack.jump(Route::Queries(b));
-        assert_eq!(crumbs(&stack), ["b"]);
-        stack.pop();
-        assert!(matches!(stack.top(), View::Connections(_)));
+    /// Back to the connection list, narrowed by `filter`. Returns the
+    /// removed views, top first, so the caller can close them.
+    pub fn reset(&mut self, filter: Option<Filter>) -> Vec<View> {
+        self.root.set_filter(filter);
+        let mut removed = std::mem::take(&mut self.above);
+        removed.reverse();
+        removed
     }
 }

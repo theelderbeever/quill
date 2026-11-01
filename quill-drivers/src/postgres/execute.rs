@@ -232,7 +232,8 @@ impl ColumnKind {
             "INT8" => Self::Int64,
             "FLOAT4" => Self::Float32,
             "FLOAT8" => Self::Float64,
-            "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" => Self::Text,
+            // sqlx names `bpchar`, i.e. `char(n)`, as `CHAR`.
+            "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" => Self::Text,
             "BYTEA" => Self::Binary,
             "DATE" => Self::Date,
             "TIME" => Self::Time,

@@ -10,14 +10,19 @@ use tokio::{
     time::{Interval, MissedTickBehavior},
 };
 
-use crate::connection::ConnectionName;
+use crate::{
+    connection::ConnectionId,
+    task::{RunMsg, catalog::CatalogMsg},
+};
 
 /// An update from a background task.
 pub enum Msg {
     Connected {
-        name: ConnectionName,
+        id: ConnectionId,
         result: quill_core::error::Result<Arc<dyn ConnectionPool>>,
     },
+    Run(RunMsg),
+    Catalog(CatalogMsg),
 }
 
 pub enum Event {

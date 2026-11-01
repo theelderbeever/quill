@@ -138,6 +138,7 @@ async fn converts_native_result_types_and_nulls()
          TIME '12:34:56' AS clock, TIMESTAMP '2026-01-01 12:34:56' AS local_time, \
          TIMESTAMPTZ '2026-01-01 12:34:56+00' AS instant, \
          '00000000-0000-0000-0000-000000000001'::uuid AS identifier, \
+         'US'::char(2) AS country, 'abc'::varchar(5) AS short_text, \
          NULL::text AS missing",
         ))
         .await?;
@@ -145,8 +146,13 @@ async fn converts_native_result_types_and_nulls()
     while let Some(event) = execution.events.next().await {
         if let QueryEvent::Batch { batch, .. } = event? {
             assert_eq!(batch.num_rows(), 1);
-            assert_eq!(batch.num_columns(), 12);
-            assert_eq!(batch.column(11).null_count(), 1);
+            assert_eq!(batch.num_columns(), 14);
+            let country = batch
+                .column(11)
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>();
+            assert_eq!(country.map(|c| c.value(0)), Some("US"));
+            assert_eq!(batch.column(13).null_count(), 1);
             batches += 1;
         }
     }

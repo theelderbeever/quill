@@ -1,15 +1,21 @@
-//! Configured connections and their live pool state.
-use std::{borrow::Borrow, error::Error as _, fmt, sync::Arc};
+//! Configured connections, grouped by source file, and their live pool state.
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use indexmap::IndexMap;
-use quill_core::error::Result;
+use quill_core::{error::Result, metadata::TableRef};
 use quill_drivers::{ConnectionPool, PoolFuture};
 
+use crate::filter::Filter;
+
 /// How the TUI reaches one configured connection. The application owns the
-/// mapping from configuration to drivers; the TUI only asks for a pool.
+/// mapping from configuration to drivers and query directories.
 ///
 /// ```
-/// use std::sync::Arc;
+/// use std::{path::Path, sync::Arc};
 /// use quill_core::error::Error;
 /// use quill_drivers::{ConnectionPool, PoolFuture};
 /// use quill_tui::ConnectionSource;
@@ -23,6 +29,9 @@ use quill_drivers::{ConnectionPool, PoolFuture};
 ///     fn connect(&self) -> PoolFuture<'_, Arc<dyn ConnectionPool>> {
 ///         Box::pin(async { Err(Error::UnsupportedOperation("connect")) })
 ///     }
+///     fn query_dir(&self) -> &Path {
+///         Path::new("queries/offline")
+///     }
 /// }
 /// ```
 pub trait ConnectionSource: Send + Sync {
@@ -30,29 +39,65 @@ pub trait ConnectionSource: Send + Sync {
     fn kind(&self) -> &'static str;
 
     fn connect(&self) -> PoolFuture<'_, Arc<dyn ConnectionPool>>;
+
+    /// Directory of this connection's saved `.sql` files; need not exist yet.
+    fn query_dir(&self) -> &Path;
+
+    /// How to name `table` in this connection's SQL, quoted. Defaults to
+    /// `"schema"."table"`.
+    fn table_reference(&self, table: &TableRef) -> String {
+        format!(
+            "{}.{}",
+            quote(&table.schema.name, '"'),
+            quote(&table.name, '"')
+        )
+    }
 }
 
-/// A connection name present in config. Only [`Connections::resolve`] creates
-/// one, so holding a name means the connection exists.
+/// `name` wrapped in `mark`, with embedded marks doubled.
+///
+/// ```
+/// assert_eq!(quill_tui::quote("a\"b", '"'), "\"a\"\"b\"");
+/// assert_eq!(quill_tui::quote("t", '`'), "`t`");
+/// ```
+pub fn quote(name: &str, mark: char) -> String {
+    let doubled = format!("{mark}{mark}");
+    format!("{mark}{}{mark}", name.replace(mark, &doubled))
+}
+
+/// Connections defined in one file.
+pub struct ConnectionGroup {
+    /// Shown as the group heading; the file's path.
+    pub label: String,
+    pub connections: Vec<(String, Box<dyn ConnectionSource>)>,
+}
+
+/// A configured connection: its group plus its name within that group.
+/// Only [`Connections`] creates one, so holding an id means it exists.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ConnectionName(Arc<str>);
+pub struct ConnectionId {
+    group: usize,
+    name: Arc<str>,
+}
 
-impl ConnectionName {
-    pub fn as_str(&self) -> &str {
-        &self.0
+impl ConnectionId {
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
-impl Borrow<str> for ConnectionName {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ConnectionName {
+impl fmt::Display for ConnectionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.name)
     }
+}
+
+/// What a bare connection name refers to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Target {
+    One(ConnectionId),
+    /// Defined in several files; the connection list shows just these.
+    Many(Filter),
 }
 
 pub enum ConnectionState {
@@ -79,47 +124,67 @@ struct Entry {
     state: ConnectionState,
 }
 
-/// Connections in config order.
+/// Connections in file order, then config order within each file.
 ///
 /// ```
-/// # use std::sync::Arc;
+/// # use std::{path::Path, sync::Arc};
 /// # use quill_core::error::Error;
 /// # use quill_drivers::{ConnectionPool, PoolFuture};
-/// # use quill_tui::{ConnectionSource, Connections};
+/// # use quill_tui::{ConnectionGroup, ConnectionSource, Connections, Target};
 /// # struct Offline;
 /// # impl ConnectionSource for Offline {
 /// #     fn kind(&self) -> &'static str { "offline" }
 /// #     fn connect(&self) -> PoolFuture<'_, Arc<dyn ConnectionPool>> {
 /// #         Box::pin(async { Err(Error::UnsupportedOperation("connect")) })
 /// #     }
+/// #     fn query_dir(&self) -> &Path { Path::new("q") }
 /// # }
-/// let connections = Connections::new([("pg_prod".to_owned(), Offline)]);
-/// assert_eq!(connections.resolve("pg_prod").map(|n| n.as_str()), Some("pg_prod"));
-/// assert!(connections.resolve("missing").is_none());
+/// let group = |label: &str, names: &[&str]| ConnectionGroup {
+///     label: label.into(),
+///     connections: names
+///         .iter()
+///         .map(|n| (n.to_string(), Box::new(Offline) as Box<dyn ConnectionSource>))
+///         .collect(),
+/// };
+/// let connections = Connections::new([group("home", &["pg", "ch"]), group("project", &["pg"])]);
+/// assert!(matches!(connections.lookup("ch"), Some(Target::One(_))));
+/// assert!(matches!(connections.lookup("pg"), Some(Target::Many(_))));
+/// assert!(connections.lookup("missing").is_none());
 /// ```
 pub struct Connections {
-    entries: IndexMap<ConnectionName, Entry>,
+    labels: Vec<String>,
+    entries: IndexMap<ConnectionId, Entry>,
 }
 
 impl Connections {
-    pub fn new<S: ConnectionSource + 'static>(
-        sources: impl IntoIterator<Item = (String, S)>,
-    ) -> Self {
-        let entries = sources
-            .into_iter()
-            .map(|(name, source)| {
+    pub fn new(groups: impl IntoIterator<Item = ConnectionGroup>) -> Self {
+        let mut labels = Vec::new();
+        let mut entries = IndexMap::new();
+        for (group, ConnectionGroup { label, connections }) in groups.into_iter().enumerate() {
+            labels.push(label);
+            for (name, source) in connections {
+                let id = ConnectionId {
+                    group,
+                    name: name.into(),
+                };
                 let entry = Entry {
-                    source: Arc::new(source),
+                    source: Arc::from(source),
                     state: ConnectionState::Idle,
                 };
-                (ConnectionName(name.into()), entry)
-            })
-            .collect();
-        Self { entries }
+                entries.insert(id, entry);
+            }
+        }
+        Self { labels, entries }
     }
 
-    pub fn resolve(&self, name: &str) -> Option<&ConnectionName> {
-        self.entries.get_key_value(name).map(|(name, _)| name)
+    /// Resolve a bare name across all files; `None` when no file defines it.
+    pub fn lookup(&self, name: &str) -> Option<Target> {
+        let mut matches = self.entries.keys().filter(|id| id.name() == name);
+        let first = matches.next()?;
+        Some(match matches.next() {
+            None => Target::One(first.clone()),
+            Some(_) => Target::Many(Filter::exact(name)),
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -130,32 +195,50 @@ impl Connections {
         self.entries.is_empty()
     }
 
-    pub fn get_index(&self, index: usize) -> Option<&ConnectionName> {
-        self.entries.get_index(index).map(|(name, _)| name)
+    pub(crate) fn label(&self, id: &ConnectionId) -> &str {
+        self.labels.get(id.group).map_or("", String::as_str)
     }
 
-    pub fn kind(&self, name: &ConnectionName) -> &'static str {
-        self.entries.get(name).map_or("", |e| e.source.kind())
+    pub(crate) fn kind(&self, id: &ConnectionId) -> &'static str {
+        self.entries.get(id).map_or("", |e| e.source.kind())
     }
 
-    pub fn state(&self, name: &ConnectionName) -> Option<&ConnectionState> {
-        self.entries.get(name).map(|e| &e.state)
+    pub(crate) fn query_dir(&self, id: &ConnectionId) -> PathBuf {
+        self.entries
+            .get(id)
+            .map_or_else(PathBuf::new, |e| e.source.query_dir().to_path_buf())
     }
 
-    /// Name, kind and state of each connection, in config order.
-    pub fn iter(&self) -> impl Iterator<Item = (&ConnectionName, &'static str, &ConnectionState)> {
+    pub(crate) fn state(&self, id: &ConnectionId) -> Option<&ConnectionState> {
+        self.entries.get(id).map(|e| &e.state)
+    }
+
+    pub(crate) fn table_reference(&self, id: &ConnectionId, table: &TableRef) -> String {
+        self.entries
+            .get(id)
+            .map_or_else(|| table.name.clone(), |e| e.source.table_reference(table))
+    }
+
+    pub(crate) fn pool(&self, id: &ConnectionId) -> Option<Arc<dyn ConnectionPool>> {
+        match self.state(id)? {
+            ConnectionState::Connected(pool) => Some(pool.clone()),
+            _ => None,
+        }
+    }
+
+    /// Id, kind and state of each connection, in display order.
+    pub(crate) fn iter(
+        &self,
+    ) -> impl Iterator<Item = (&ConnectionId, &'static str, &ConnectionState)> {
         self.entries
             .iter()
-            .map(|(name, e)| (name, e.source.kind(), &e.state))
+            .map(|(id, e)| (id, e.source.kind(), &e.state))
     }
 
-    /// Mark `name` as connecting and hand back its source, unless it is
+    /// Mark `id` as connecting and hand back its source, unless it is
     /// already connected or connecting.
-    pub(crate) fn begin_connect(
-        &mut self,
-        name: &ConnectionName,
-    ) -> Option<Arc<dyn ConnectionSource>> {
-        let entry = self.entries.get_mut(name)?;
+    pub(crate) fn begin_connect(&mut self, id: &ConnectionId) -> Option<Arc<dyn ConnectionSource>> {
+        let entry = self.entries.get_mut(id)?;
         match entry.state {
             ConnectionState::Idle | ConnectionState::Failed(_) => {
                 entry.state = ConnectionState::Connecting;
@@ -167,10 +250,10 @@ impl Connections {
 
     pub(crate) fn finish_connect(
         &mut self,
-        name: &ConnectionName,
+        id: &ConnectionId,
         result: Result<Arc<dyn ConnectionPool>>,
     ) {
-        let Some(entry) = self.entries.get_mut(name) else {
+        let Some(entry) = self.entries.get_mut(id) else {
             return;
         };
         // Disconnected while connecting; drop the late result.
@@ -179,25 +262,14 @@ impl Connections {
         }
         entry.state = match result {
             Ok(pool) => ConnectionState::Connected(pool),
-            Err(error) => {
-                let mut message = error.to_string();
-                let mut source = error.source();
-                while let Some(cause) = source {
-                    message.push_str(": ");
-                    message.push_str(&cause.to_string());
-                    source = cause.source();
-                }
-                ConnectionState::Failed(message)
-            }
+            Err(error) => ConnectionState::Failed(error_chain(&error)),
         };
     }
-}
 
-impl Connections {
     /// Drop the pool, or abandon an attempt in flight. Returns whether
     /// anything was open.
-    pub(crate) fn disconnect(&mut self, name: &ConnectionName) -> bool {
-        let Some(entry) = self.entries.get_mut(name) else {
+    pub(crate) fn disconnect(&mut self, id: &ConnectionId) -> bool {
+        let Some(entry) = self.entries.get_mut(id) else {
             return false;
         };
         let open = matches!(
@@ -209,13 +281,25 @@ impl Connections {
     }
 }
 
+/// An error and its sources joined by `: `.
+pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
     use quill_core::error::Error;
 
     /// A source whose connection attempts always fail.
-    pub(crate) struct Offline;
+    pub(crate) struct Offline(pub PathBuf);
 
     impl ConnectionSource for Offline {
         fn kind(&self) -> &'static str {
@@ -224,22 +308,51 @@ pub(crate) mod testing {
         fn connect(&self) -> PoolFuture<'_, Arc<dyn ConnectionPool>> {
             Box::pin(async { Err(Error::UnsupportedOperation("connect")) })
         }
+        fn query_dir(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    pub(crate) fn group(label: &str, names: &[&str]) -> ConnectionGroup {
+        ConnectionGroup {
+            label: label.into(),
+            connections: names
+                .iter()
+                .map(|n| {
+                    let source: Box<dyn ConnectionSource> = Box::new(Offline(
+                        std::env::temp_dir().join("quill-test-none").join(n),
+                    ));
+                    ((*n).to_owned(), source)
+                })
+                .collect(),
+        }
     }
 
     pub(crate) fn connections(names: &[&str]) -> Connections {
-        Connections::new(names.iter().map(|n| ((*n).to_owned(), Offline)))
+        Connections::new([group("home", names)])
+    }
+
+    /// The single connection named `name`.
+    pub(crate) fn id(connections: &Connections, name: &str) -> ConnectionId {
+        match connections.lookup(name) {
+            Some(Target::One(id)) => id,
+            _ => panic!("expected one connection named {name}"),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{testing::connections, *};
+    use super::{
+        testing::{connections, group, id},
+        *,
+    };
     use quill_core::error::Error;
 
     #[test]
     fn connects_once_and_retries_after_failure() {
         let mut connections = connections(&["a"]);
-        let name = connections.resolve("a").cloned().unwrap();
+        let name = id(&connections, "a");
         assert!(connections.begin_connect(&name).is_some());
         assert!(connections.begin_connect(&name).is_none());
 
@@ -254,7 +367,7 @@ mod tests {
     #[test]
     fn disconnect_drops_a_late_connect_result() {
         let mut connections = connections(&["a"]);
-        let name = connections.resolve("a").cloned().unwrap();
+        let name = id(&connections, "a");
         connections.begin_connect(&name);
         assert!(connections.disconnect(&name));
         connections.finish_connect(&name, Err(Error::UnsupportedOperation("connect")));
@@ -263,5 +376,19 @@ mod tests {
             Some(ConnectionState::Idle)
         ));
         assert!(!connections.disconnect(&name));
+    }
+
+    #[test]
+    fn same_name_in_two_files_is_ambiguous() {
+        let connections = Connections::new([group("home", &["pg"]), group("project", &["pg"])]);
+        assert_eq!(
+            connections.lookup("pg"),
+            Some(Target::Many(Filter::exact("pg")))
+        );
+        let ids: Vec<_> = connections
+            .iter()
+            .map(|(id, ..)| connections.label(id))
+            .collect();
+        assert_eq!(ids, ["home", "project"]);
     }
 }
