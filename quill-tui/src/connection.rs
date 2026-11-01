@@ -24,6 +24,9 @@ use crate::filter::Filter;
 /// struct Offline;
 ///
 /// impl ConnectionSource for Offline {
+///     fn user(&self) -> Option<&str> {
+///         None
+///     }
 ///     fn kind(&self) -> &'static str {
 ///         "offline"
 ///     }
@@ -147,6 +150,7 @@ struct Entry {
 /// # use quill_tui::{ConnectionGroup, ConnectionSource, Connections, Target};
 /// # struct Offline;
 /// # impl ConnectionSource for Offline {
+/// #     fn user(&self) -> Option<&str> { None }
 /// #     fn kind(&self) -> &'static str { "offline" }
 /// #     fn connect(&self) -> PoolFuture<'_, Arc<dyn ConnectionPool>> {
 /// #         Box::pin(async { Err(Error::UnsupportedOperation("connect")) })
