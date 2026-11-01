@@ -323,3 +323,51 @@ async fn array_values_and_nulls() -> std::result::Result<(), Box<dyn std::error:
     assert!(batches > 1);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires Docker Compose Postgres"]
+async fn native_arrays_json_and_interval() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    use arrow::array::{Array, IntervalMonthDayNanoArray, ListArray, StringArray};
+    let pool = pool().await?;
+    let mut execution = pool.execute(QueryRequest::new("SELECT ARRAY['12345678901234567890.12345678901234567890'::numeric,NULL], ARRAY['00000000-0000-0000-0000-000000000001'::uuid,NULL], '{\"n\":12345678901234567890}'::jsonb, interval '2 months 3 days 4 microseconds' FROM generate_series(1,1200)")).await?;
+    let mut schema = None;
+    let mut count = 0;
+    let mut batches = 0;
+    while let Some(event) = execution.events.next().await {
+        match event? {
+            QueryEvent::Schema { schema: value, .. } => schema = Some(value),
+            QueryEvent::Batch { batch, .. } => {
+                assert_eq!(Some(batch.schema()), schema);
+                let lists = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<ListArray>()
+                    .ok_or("numeric lists")?;
+                let intervals = batch
+                    .column(3)
+                    .as_any()
+                    .downcast_ref::<IntervalMonthDayNanoArray>()
+                    .ok_or("intervals")?;
+                for row in 0..batch.num_rows() {
+                    let values = lists.value(row);
+                    let values = values
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .ok_or("decimal text")?;
+                    assert_eq!(values.value(0), "12345678901234567890.12345678901234567890");
+                    assert!(values.is_null(1));
+                    assert_eq!(
+                        intervals.value(row),
+                        arrow::datatypes::IntervalMonthDayNano::new(2, 3, 4000)
+                    );
+                }
+                count += batch.num_rows();
+                batches += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(count, 1200);
+    assert!(batches > 1);
+    Ok(())
+}

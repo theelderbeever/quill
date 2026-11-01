@@ -25,3 +25,70 @@ async fn sqlite_execution() -> TestResult {
     assert_eq!(measured.server, None);
     failures(&pool, "SELECT missing_execution_column", "SELECT 42").await
 }
+
+#[tokio::test]
+async fn mixed_storage_classes_fail_without_coercion() -> TestResult {
+    use futures::TryStreamExt;
+    let pool = SqliteConnectionPool::connect(&SqliteSettings {
+        path: ":memory:".into(),
+        params: Default::default(),
+    })
+    .await?;
+    sqlx::query("CREATE TABLE mixed(value INTEGER)")
+        .execute(pool.inner())
+        .await?;
+    sqlx::query("INSERT INTO mixed VALUES(42),('not an integer')")
+        .execute(pool.inner())
+        .await?;
+    let mut execution = pool
+        .execute(QueryRequest::new("SELECT value FROM mixed"))
+        .await?;
+    let mut failed = false;
+    loop {
+        match execution.events.try_next().await {
+            Ok(Some(QueryEvent::Batch { .. })) => panic!("mixed values must not be coerced"),
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(_) => {
+                failed = true;
+                break;
+            }
+        }
+    }
+    assert!(failed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn owned_sql_keeps_text_parameters_bound() -> TestResult {
+    use arrow::array::StringArray;
+    use futures::TryStreamExt;
+
+    let pool = SqliteConnectionPool::connect(&SqliteSettings {
+        path: ":memory:".into(),
+        params: Default::default(),
+    })
+    .await?;
+    let value = "'); SELECT 'this remains data";
+    let sql = String::from("SELECT CAST(? AS TEXT) AS bound");
+    let mut request = QueryRequest::new(sql);
+    request
+        .bindings
+        .positional
+        .push(ParameterValue::Text(value.into()));
+    let mut execution = pool.execute(request).await?;
+    let mut rows = 0;
+    while let Some(event) = execution.events.try_next().await? {
+        if let QueryEvent::Batch { batch, .. } = event {
+            let values = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("text array")?;
+            assert_eq!(values.value(0), value);
+            rows += batch.num_rows();
+        }
+    }
+    assert_eq!(rows, 1);
+    Ok(())
+}

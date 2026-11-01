@@ -9,13 +9,13 @@ docker tls='false':
     fi
     if [ '{{ tls }}' = true ]; then
         sh docker/tls/generate.sh
-        docker compose -f docker-compose.yaml -f docker-compose.tls.yaml up -d
+        sh docker/compose.sh -f docker-compose.yaml -f docker-compose.tls.yaml up -d
     else
-        docker compose -f docker-compose.yaml up -d
+        sh docker/compose.sh -f docker-compose.yaml up -d
     fi
 
 stop-docker:
-    docker compose -f docker-compose.yaml -f docker-compose.tls.yaml down
+    sh docker/compose.sh -f docker-compose.yaml -f docker-compose.tls.yaml down
 
 # Regenerate the fake Postgres seed data; applied when the pg container is recreated.
 seed rows='10000':

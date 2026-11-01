@@ -1,5 +1,6 @@
 mod execute;
 mod metadata;
+mod result;
 use metadata::{ColumnRow, IndexRow, NameRow, SchemaRow, TableRow};
 
 mod settings;

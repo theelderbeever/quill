@@ -1,14 +1,9 @@
-use super::*;
-use arrow::{
-    array::*,
-    datatypes::{DataType, Field, Schema},
-    record_batch::RecordBatch,
-};
+use super::{result::Kind, *};
+use arrow::{datatypes::Schema, record_batch::RecordBatch};
 use futures::TryStreamExt;
 use quill_core::query::*;
 use scylla::{
     errors::{RequestAttemptError, RequestError},
-    frame::response::result::{ColumnType, NativeType},
     observability::history::{AttemptId, HistoryListener, RequestId, SpeculativeId},
     policies::retry::RetryDecision,
     value::{CqlValue, Row},
@@ -112,7 +107,7 @@ impl ScyllaConnectionPool {
                 .column_specs()
                 .iter()
                 .zip(&kinds)
-                .map(|(s, k)| Field::new(s.name(), k.data_type(), true))
+                .map(|(s, k)| k.field(s.name()))
                 .collect::<Vec<_>>(),
         ));
         if !kinds.is_empty() {
@@ -165,7 +160,7 @@ impl ScyllaConnectionPool {
             .iter()
             .enumerate()
             .map(|(i, k)| k.array(rows, i))
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let batch = RecordBatch::try_new(schema.clone(), arrays)
             .map_err(|e| Error::QueryExecution(Box::new(e)))?;
         control
@@ -179,123 +174,6 @@ impl ScyllaConnectionPool {
             .await
     }
 }
-enum Kind {
-    Text,
-    Blob,
-    Boolean,
-    Int,
-    BigInt,
-    SmallInt,
-    TinyInt,
-    Float,
-    Double,
-}
-impl Kind {
-    fn parse(t: &ColumnType<'_>) -> Result<Self> {
-        Ok(match t {
-            ColumnType::Native(NativeType::Boolean) => Self::Boolean,
-            ColumnType::Native(NativeType::Int) => Self::Int,
-            ColumnType::Native(NativeType::BigInt) => Self::BigInt,
-            ColumnType::Native(NativeType::SmallInt) => Self::SmallInt,
-            ColumnType::Native(NativeType::TinyInt) => Self::TinyInt,
-            ColumnType::Native(NativeType::Float) => Self::Float,
-            ColumnType::Native(NativeType::Double) => Self::Double,
-            ColumnType::Native(NativeType::Text | NativeType::Ascii) => Self::Text,
-            ColumnType::Native(NativeType::Blob) => Self::Blob,
-            _ => return Err(Error::UnsupportedOperation("Scylla result type")),
-        })
-    }
-    fn data_type(&self) -> DataType {
-        match self {
-            Self::Text => DataType::Utf8,
-            Self::Blob => DataType::Binary,
-            Self::Boolean => DataType::Boolean,
-            Self::Int => DataType::Int32,
-            Self::BigInt => DataType::Int64,
-            Self::SmallInt => DataType::Int16,
-            Self::TinyInt => DataType::Int8,
-            Self::Float => DataType::Float32,
-            Self::Double => DataType::Float64,
-        }
-    }
-    fn array(&self, rows: &[Row], index: usize) -> ArrayRef {
-        match self {
-            Self::Text => Arc::new(
-                rows.iter()
-                    .map(|r| match &r.columns[index] {
-                        Some(CqlValue::Text(v) | CqlValue::Ascii(v)) => Some(v.as_str()),
-                        _ => None,
-                    })
-                    .collect::<StringArray>(),
-            ),
-            Self::Blob => Arc::new(
-                rows.iter()
-                    .map(|r| match &r.columns[index] {
-                        Some(CqlValue::Blob(v)) => Some(v.as_slice()),
-                        _ => None,
-                    })
-                    .collect::<BinaryArray>(),
-            ),
-            Self::Boolean => Arc::new(
-                rows.iter()
-                    .map(|r| match &r.columns[index] {
-                        Some(CqlValue::Boolean(v)) => Some(*v),
-                        _ => None,
-                    })
-                    .collect::<BooleanArray>(),
-            ),
-            Self::Int => Arc::new(
-                rows.iter()
-                    .map(|r| match &r.columns[index] {
-                        Some(CqlValue::Int(v)) => Some(*v),
-                        _ => None,
-                    })
-                    .collect::<Int32Array>(),
-            ),
-            Self::BigInt => Arc::new(
-                rows.iter()
-                    .map(|r| match &r.columns[index] {
-                        Some(CqlValue::BigInt(v)) => Some(*v),
-                        _ => None,
-                    })
-                    .collect::<Int64Array>(),
-            ),
-            Self::SmallInt => Arc::new(
-                rows.iter()
-                    .map(|r| match &r.columns[index] {
-                        Some(CqlValue::SmallInt(v)) => Some(*v),
-                        _ => None,
-                    })
-                    .collect::<Int16Array>(),
-            ),
-            Self::TinyInt => Arc::new(
-                rows.iter()
-                    .map(|r| match &r.columns[index] {
-                        Some(CqlValue::TinyInt(v)) => Some(*v),
-                        _ => None,
-                    })
-                    .collect::<Int8Array>(),
-            ),
-            Self::Float => Arc::new(
-                rows.iter()
-                    .map(|r| match &r.columns[index] {
-                        Some(CqlValue::Float(v)) => Some(*v),
-                        _ => None,
-                    })
-                    .collect::<Float32Array>(),
-            ),
-            Self::Double => Arc::new(
-                rows.iter()
-                    .map(|r| match &r.columns[index] {
-                        Some(CqlValue::Double(v)) => Some(*v),
-                        _ => None,
-                    })
-                    .collect::<Float64Array>(),
-            ),
-        }
-    }
-}
-
 impl ScyllaConnectionPool {
     fn parameter(value: ParameterValue) -> Result<Option<CqlValue>> {
         use chrono::Timelike;

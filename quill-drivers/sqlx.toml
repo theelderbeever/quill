@@ -1,0 +1,4 @@
+# Keep compile-time query mappings aligned with the driver's runtime types.
+[macros.preferred-crates]
+date-time = "chrono"
+numeric = "bigdecimal"

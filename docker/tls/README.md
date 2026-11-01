@@ -4,7 +4,7 @@ Local TLS testing
 Requires Just and OpenSSL with `req -addext` support.
 
 ```sh
-just docker
+just docker --tls
 ```
 
 The recipe generates certificates before starting Compose with the TLS override.
@@ -40,7 +40,7 @@ mysql --host=127.0.0.1 --user=quill --password \
 To return to plaintext, recreate the services with the base configuration:
 
 ```sh
-docker compose up -d --force-recreate
+sh docker/compose.sh -f docker-compose.yaml up -d --force-recreate
 ```
 
 Generated certificates expire after 365 days. The generator replaces expired or
@@ -49,9 +49,9 @@ regeneration. To force rotation, stop the services, run the generator, and
 recreate the services:
 
 ```sh
-docker compose -f docker-compose.yaml -f docker-compose.tls.yaml down
+sh docker/compose.sh -f docker-compose.yaml -f docker-compose.tls.yaml down
 FORCE_REGENERATE=1 sh docker/tls/generate.sh
-docker compose -f docker-compose.yaml -f docker-compose.tls.yaml up -d
+sh docker/compose.sh -f docker-compose.yaml -f docker-compose.tls.yaml up -d
 ```
 
 Certificates are written to `docker/tls/certs` so host clients can read the CA.

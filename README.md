@@ -16,6 +16,9 @@ database. Avoid running multiple copies of the integration suite simultaneously.
 
 ### Compose with TLS
 
+The recipes use `docker compose` when available and fall back to the standalone
+`docker-compose` command.
+
 Generate local certificates and start the services:
 
 ```sh
@@ -63,5 +66,5 @@ cargo check --workspace
 Stop the development services when finished:
 
 ```sh
-docker compose -f docker-compose.yaml -f docker-compose.tls.yaml down
+just stop-docker
 ```
