@@ -62,3 +62,17 @@ propagated rather than coercing a value into a different storage class.
 Text or binary representations of semantic types carry `quill.native_type`,
 `quill.logical_type` and `quill.encoding` metadata. Consumers should inspect this
 metadata before treating those fields as ordinary strings or bytes.
+
+## SQLx configuration
+
+The workspace uses SQLx 0.9 with `sqlx-toml` enabled. The crate-local
+`quill-drivers/sqlx.toml` fixes query-macro type preferences to Chrono and
+BigDecimal, matching runtime decoding even if other dependencies enable competing
+SQLx type features. SQLx reads this file for this crate only; it does not replace
+Quill's runtime connection settings. Current execution uses runtime queries, so
+these preferences apply when adding compile-time checked queries.
+
+Use `sqlx-cli` 0.9.0 for SQLx development commands, and run them from
+`quill-drivers` so the CLI reads the crate's configuration. See the
+[SQLx configuration reference](https://github.com/transact-rs/sqlx/blob/v0.9.0/sqlx-core/src/config/reference.toml)
+for supported options.

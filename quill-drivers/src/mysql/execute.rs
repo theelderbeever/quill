@@ -13,7 +13,7 @@ use quill_core::{
     query::*,
 };
 use sqlx::{
-    Column, Executor, Row, Statement, TypeInfo,
+    Column, Executor, Row, SqlSafeStr, Statement, TypeInfo,
     mysql::{MySqlArguments, MySqlRow},
 };
 use tokio::sync::mpsc;
@@ -61,8 +61,10 @@ impl MysqlConnectionPool {
         if !request.bindings.named.is_empty() {
             return Err(Error::UnsupportedOperation("Mysql named parameters"));
         }
+        // Requests contain SQL supplied by the caller; values remain separately bound.
+        let sql = sqlx::AssertSqlSafe(Arc::new(request.sql)).into_sql_str();
         let mut query: sqlx::query::Query<'_, sqlx::MySql, MySqlArguments> =
-            sqlx::query(&request.sql);
+            sqlx::query(sql.clone());
         for value in request.bindings.positional {
             query = match value {
                 ParameterValue::Null => query.bind(Option::<String>::None),
@@ -81,7 +83,7 @@ impl MysqlConnectionPool {
         }
         let work = async {
             let mut connection = pool.acquire().await?;
-            let description = (&mut *connection).prepare(&request.sql).await?;
+            let description = (&mut *connection).prepare(sql).await?;
             let kinds = description
                 .columns()
                 .iter()

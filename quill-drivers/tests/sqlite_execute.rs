@@ -58,3 +58,37 @@ async fn mixed_storage_classes_fail_without_coercion() -> TestResult {
     assert!(failed);
     Ok(())
 }
+
+#[tokio::test]
+async fn owned_sql_keeps_text_parameters_bound() -> TestResult {
+    use arrow::array::StringArray;
+    use futures::TryStreamExt;
+
+    let pool = SqliteConnectionPool::connect(&SqliteSettings {
+        path: ":memory:".into(),
+        params: Default::default(),
+    })
+    .await?;
+    let value = "'); SELECT 'this remains data";
+    let sql = String::from("SELECT CAST(? AS TEXT) AS bound");
+    let mut request = QueryRequest::new(sql);
+    request
+        .bindings
+        .positional
+        .push(ParameterValue::Text(value.into()));
+    let mut execution = pool.execute(request).await?;
+    let mut rows = 0;
+    while let Some(event) = execution.events.try_next().await? {
+        if let QueryEvent::Batch { batch, .. } = event {
+            let values = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("text array")?;
+            assert_eq!(values.value(0), value);
+            rows += batch.num_rows();
+        }
+    }
+    assert_eq!(rows, 1);
+    Ok(())
+}

@@ -13,7 +13,7 @@ use quill_core::{
     query::*,
 };
 use sqlx::{
-    Column, Executor, Row, TypeInfo,
+    Column, Executor, Row, SqlSafeStr, TypeInfo,
     sqlite::{SqliteArguments, SqliteRow},
 };
 use tokio::sync::mpsc;
@@ -61,8 +61,10 @@ impl SqliteConnectionPool {
         if !request.bindings.named.is_empty() {
             return Err(Error::UnsupportedOperation("Sqlite named parameters"));
         }
+        // Requests contain SQL supplied by the caller; values remain separately bound.
+        let sql = sqlx::AssertSqlSafe(Arc::new(request.sql)).into_sql_str();
         let mut query: sqlx::query::Query<'_, sqlx::Sqlite, SqliteArguments> =
-            sqlx::query(&request.sql);
+            sqlx::query(sql.clone());
         for value in request.bindings.positional {
             query = match value {
                 ParameterValue::Null => query.bind(Option::<String>::None),
@@ -83,7 +85,7 @@ impl SqliteConnectionPool {
         }
         let work = async {
             let mut connection = pool.acquire().await?;
-            let description = (&mut *connection).describe(&request.sql).await?;
+            let description = (&mut *connection).describe(sql).await?;
             let kinds = description
                 .columns()
                 .iter()

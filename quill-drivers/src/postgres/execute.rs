@@ -13,7 +13,7 @@ use quill_core::{
     query::*,
 };
 use sqlx::{
-    Column, Executor, Row, Statement, TypeInfo,
+    Column, Executor, Row, SqlSafeStr, Statement, TypeInfo,
     postgres::{PgArguments, PgRow},
 };
 use tokio::sync::mpsc;
@@ -69,8 +69,10 @@ impl PostgresConnectionPool {
         if !request.bindings.named.is_empty() {
             return Err(Error::UnsupportedOperation("Postgres named parameters"));
         }
+        // Requests contain SQL supplied by the caller; values remain separately bound.
+        let sql = sqlx::AssertSqlSafe(Arc::new(request.sql)).into_sql_str();
         let mut query: sqlx::query::Query<'_, sqlx::Postgres, PgArguments> =
-            sqlx::query(&request.sql);
+            sqlx::query(sql.clone());
         let mut parameter_types = Vec::with_capacity(request.bindings.positional.len());
         for value in request.bindings.positional {
             let type_name = match &value {
@@ -105,7 +107,7 @@ impl PostgresConnectionPool {
         let work = async {
             let mut connection = pool.acquire().await?;
             let description = (&mut *connection)
-                .prepare_with(&request.sql, &parameter_types)
+                .prepare_with(sql, &parameter_types)
                 .await?;
             let mut kinds = Vec::with_capacity(description.columns().len());
             for column in description.columns() {
