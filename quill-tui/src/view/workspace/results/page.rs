@@ -70,7 +70,7 @@ mod tests {
             rows: rows
                 .map(|row| PageRow {
                     row,
-                    cells: vec![row.to_string()],
+                    cells: vec![crate::task::page::Cell::Text(row.to_string())],
                 })
                 .collect(),
         }

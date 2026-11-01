@@ -30,6 +30,7 @@ impl ClickhouseConnectionPool {
     /// Stream query results as Arrow batches without collecting the result set.
     ///
     /// The query must omit a FORMAT clause; the Arrow extension supplies it.
+    /// ClickHouse strings are returned as Arrow binary values to preserve arbitrary bytes.
     ///
     /// ```no_run
     /// use quill_drivers::clickhouse::ClickhouseConnectionPool;
@@ -44,6 +45,8 @@ impl ClickhouseConnectionPool {
         use clickhouse_ext_arrow::ArrowQueryExt;
         self.client
             .query(sql)
+            // ClickHouse String does not guarantee UTF-8.
+            .with_setting("output_format_arrow_string_as_string", "0")
             .fetch_arrow()
             .map_err(|error| Error::DriverExecute(error.into()))
     }
@@ -70,7 +73,9 @@ impl ConnectionPool for ClickhouseConnectionPool {
                     use quill_core::query::QueryEvent;
                     let mut query = client
                         .query(&request.sql)
-                        .with_setting("query_id", Self::server_query_id(id));
+                        .with_setting("query_id", Self::server_query_id(id))
+                        // Choose a byte-preserving schema before reading any values.
+                        .with_setting("output_format_arrow_string_as_string", "0");
                     for value in request.bindings.positional {
                         query = Self::bind_parameter(query, None, value);
                     }

@@ -20,6 +20,8 @@ pub enum Command {
 pub enum CommandError {
     #[error("no connection is open here; name one")]
     NoConnection,
+    #[error("invalid save path: {0}")]
+    SavePath(String),
     #[error("type a command")]
     Empty,
     #[error("unknown command `{0}`")]
@@ -61,7 +63,9 @@ impl Command {
                 if path.is_empty() {
                     return Err(CommandError::MissingArgument(name.to_owned()));
                 }
-                return Ok(Self::Save(path.into()));
+                return Ok(Self::Save(
+                    crate::path::SavePath::expand(path).map_err(CommandError::SavePath)?,
+                ));
             }
             "q" | "quit" => Self::Quit,
             other => return Err(CommandError::Unknown(other.to_owned())),

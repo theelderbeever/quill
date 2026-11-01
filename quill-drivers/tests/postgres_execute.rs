@@ -252,3 +252,74 @@ fn assert_numeric_text_metadata(field: &arrow::datatypes::Field) {
         assert_eq!(field.metadata().get(key).map(String::as_str), Some(value));
     }
 }
+
+#[tokio::test]
+#[ignore = "requires Docker Compose Postgres"]
+async fn array_values_and_nulls() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    use arrow::{
+        array::{Array, Int32Array, ListArray, StringArray},
+        datatypes::{DataType, Field},
+    };
+    use std::sync::Arc;
+    let pool = pool().await?;
+    let mut execution = pool.execute(QueryRequest::new(
+        "SELECT CASE n % 3 WHEN 0 THEN NULL::text[] WHEN 1 THEN ARRAY[]::text[] ELSE ARRAY['hello', NULL, 'NULL', 'a,b', '☃'] END AS texts, ARRAY[1, NULL, 3]::int4[] AS ints FROM generate_series(0, 2499) n"
+    )).await?;
+    let mut schema = None;
+    let mut rows = 0;
+    let mut batches = 0;
+    while let Some(event) = execution.events.next().await {
+        match event? {
+            QueryEvent::Schema { schema: value, .. } => {
+                assert_eq!(
+                    value.field(0).data_type(),
+                    &DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)))
+                );
+                assert!(value.field(0).metadata().is_empty());
+                schema = Some(value);
+            }
+            QueryEvent::Batch { batch, .. } => {
+                assert_eq!(Some(batch.schema()), schema);
+                let texts = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<ListArray>()
+                    .unwrap();
+                let ints = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<ListArray>()
+                    .unwrap();
+                for i in 0..batch.num_rows() {
+                    match (rows + i) % 3 {
+                        0 => assert!(texts.is_null(i)),
+                        1 => {
+                            assert!(!texts.is_null(i));
+                            assert_eq!(texts.value(i).len(), 0);
+                        }
+                        _ => {
+                            let values = texts.value(i);
+                            let values = values.as_any().downcast_ref::<StringArray>().unwrap();
+                            assert_eq!(
+                                values.iter().collect::<Vec<_>>(),
+                                vec![Some("hello"), None, Some("NULL"), Some("a,b"), Some("☃")]
+                            );
+                        }
+                    }
+                    let values = ints.value(i);
+                    let values = values.as_any().downcast_ref::<Int32Array>().unwrap();
+                    assert_eq!(
+                        values.iter().collect::<Vec<_>>(),
+                        vec![Some(1), None, Some(3)]
+                    );
+                }
+                rows += batch.num_rows();
+                batches += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(rows, 2500);
+    assert!(batches > 1);
+    Ok(())
+}

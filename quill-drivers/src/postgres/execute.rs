@@ -222,6 +222,7 @@ enum ColumnKind {
     Uuid,
     Numeric(super::decimal::DecimalType),
     NumericText,
+    Array(ArrayKind),
 }
 impl ColumnKind {
     fn parse(name: &str) -> ExecutionResult<Self> {
@@ -241,7 +242,12 @@ impl ColumnKind {
             "TIMESTAMPTZ" => Self::TimestampTz,
             "UUID" => Self::Uuid,
 
-            _ => return Err(ExecutionError::UnsupportedType(name.into())),
+            _ => {
+                if let Some(element) = name.strip_suffix("[]") {
+                    return Ok(Self::Array(ArrayKind::parse(element)?));
+                }
+                return Err(ExecutionError::UnsupportedType(name.into()));
+            }
         })
     }
     fn field(self, name: &str) -> Field {
@@ -262,6 +268,9 @@ impl ColumnKind {
 
     fn data_type(self) -> DataType {
         match self {
+            Self::Array(kind) => {
+                DataType::List(Arc::new(Field::new("item", kind.data_type(), true)))
+            }
             Self::Bool => DataType::Boolean,
             Self::Int16 => DataType::Int16,
             Self::Int32 => DataType::Int32,
@@ -282,6 +291,7 @@ impl ColumnKind {
     }
     fn array(self, rows: &[PgRow], index: usize) -> ExecutionResult<ArrayRef> {
         Ok(match self {
+            Self::Array(kind) => kind.array(rows, index)?,
             Self::Bool => crate::macros::primitive!(rows, index, bool, BooleanArray),
             Self::Int16 => crate::macros::primitive!(rows, index, i16, Int16Array),
             Self::Int32 => crate::macros::primitive!(rows, index, i32, Int32Array),
@@ -356,6 +366,74 @@ impl ColumnKind {
                     values.iter().map(|value| value.as_deref()),
                 ))
             }
+        })
+    }
+}
+
+/// One-dimensional arrays retain element types and element nullability in Arrow.
+#[derive(Clone, Copy)]
+enum ArrayKind {
+    Bool,
+    Int16,
+    Int32,
+    Int64,
+    Float32,
+    Float64,
+    Text,
+}
+
+impl ArrayKind {
+    fn parse(name: &str) -> ExecutionResult<Self> {
+        Ok(match name {
+            "BOOL" => Self::Bool,
+            "INT2" => Self::Int16,
+            "INT4" => Self::Int32,
+            "INT8" => Self::Int64,
+            "FLOAT4" => Self::Float32,
+            "FLOAT8" => Self::Float64,
+            "TEXT" | "VARCHAR" | "CHAR" | "BPCHAR" | "NAME" => Self::Text,
+            _ => return Err(ExecutionError::UnsupportedType(format!("{name}[]"))),
+        })
+    }
+
+    fn data_type(self) -> DataType {
+        match self {
+            Self::Bool => DataType::Boolean,
+            Self::Int16 => DataType::Int16,
+            Self::Int32 => DataType::Int32,
+            Self::Int64 => DataType::Int64,
+            Self::Float32 => DataType::Float32,
+            Self::Float64 => DataType::Float64,
+            Self::Text => DataType::Utf8,
+        }
+    }
+
+    fn array(self, rows: &[PgRow], index: usize) -> ExecutionResult<ArrayRef> {
+        macro_rules! list {
+            ($native:ty, $builder:ty) => {{
+                let mut builder = ListBuilder::new(<$builder>::new());
+                for row in rows {
+                    let values = row.try_get::<Option<Vec<Option<$native>>>, _>(index)?;
+                    if let Some(values) = values {
+                        for value in values {
+                            builder.values().append_option(value);
+                        }
+                        builder.append(true);
+                    } else {
+                        builder.append(false);
+                    }
+                }
+                Arc::new(builder.finish()) as ArrayRef
+            }};
+        }
+        Ok(match self {
+            Self::Bool => list!(bool, BooleanBuilder),
+            Self::Int16 => list!(i16, Int16Builder),
+            Self::Int32 => list!(i32, Int32Builder),
+            Self::Int64 => list!(i64, Int64Builder),
+            Self::Float32 => list!(f32, Float32Builder),
+            Self::Float64 => list!(f64, Float64Builder),
+            Self::Text => list!(String, StringBuilder),
         })
     }
 }

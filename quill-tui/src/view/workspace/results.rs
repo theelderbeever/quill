@@ -416,6 +416,18 @@ impl Results {
         }
     }
 
+    pub fn handle_overlay_mouse(&mut self, event: MouseEvent) -> bool {
+        let Some(inspector) = &self.inspector else {
+            return false;
+        };
+        if matches!(event.kind, crossterm::event::MouseEventKind::Down(_))
+            && !inspector.contains(event.column, event.row)
+        {
+            self.inspector = None;
+        }
+        true
+    }
+
     fn title(&self) -> String {
         let mut title = "results".to_owned();
         if let State::Ready(ready) = &self.state {

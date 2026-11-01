@@ -26,6 +26,7 @@ pub struct Inspector {
     text: String,
     scroll: u16,
     copied: bool,
+    area: std::cell::Cell<Rect>,
 }
 
 impl Inspector {
@@ -40,7 +41,12 @@ impl Inspector {
             text: pretty.unwrap_or_else(|| value.to_owned()),
             scroll: 0,
             copied: false,
+            area: std::cell::Cell::new(Rect::default()),
         }
+    }
+
+    pub fn contains(&self, column: u16, row: u16) -> bool {
+        self.area.get().contains((column, row).into())
     }
 
     pub fn text(&self) -> &str {
@@ -68,6 +74,7 @@ impl Inspector {
         let [popup] = Layout::horizontal([Constraint::Percentage(SIZE_PERCENT)])
             .flex(Flex::Center)
             .areas(row);
+        self.area.set(popup);
         let title = if self.copied {
             format!("{} (copied)", self.title)
         } else {

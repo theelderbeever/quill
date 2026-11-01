@@ -7,6 +7,7 @@ mod connection;
 mod event;
 mod filter;
 mod format;
+mod path;
 mod store;
 mod task;
 mod view;

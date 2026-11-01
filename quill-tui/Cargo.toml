@@ -18,11 +18,13 @@ quill-io = { workspace = true, features = ["datafusion"] }
 ratatui.workspace = true
 ratatui-code-editor.workspace = true
 serde_json.workspace = true
+shellexpand = "3"
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tree-sitter-sequel.workspace = true
 unicode-width.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 quill-drivers.workspace = true

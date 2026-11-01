@@ -1,7 +1,7 @@
 //! Catalogs, schemas, tables and columns of the workspace's connection.
 mod tree;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -30,6 +30,7 @@ pub struct Catalog {
     generation: u64,
     selected: usize,
     list: ListState,
+    body: Rect,
     /// SQL for the workspace to put into the editor.
     insert: Option<String>,
 }
@@ -42,6 +43,7 @@ impl Catalog {
             generation: 0,
             selected: 0,
             list: ListState::default(),
+            body: Rect::default(),
             insert: None,
         }
     }
@@ -136,8 +138,45 @@ impl Component for Catalog {
         KeyOutcome::Consumed
     }
 
+    fn handle_mouse(&mut self, event: MouseEvent, ctx: &Context) -> KeyOutcome {
+        if !self.body.contains((event.column, event.row).into()) {
+            return KeyOutcome::Ignored;
+        }
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let index = self.list.offset() + usize::from(event.row - self.body.y);
+                let Some(Line::Node {
+                    path,
+                    expanded,
+                    leaf,
+                    ..
+                }) = self.tree.lines().into_iter().nth(index)
+                else {
+                    return KeyOutcome::Consumed;
+                };
+                self.selected = index;
+                if !leaf {
+                    if expanded {
+                        self.tree.collapse(&path);
+                    } else if let Some(load) = self.tree.expand(&path) {
+                        self.spawn(path, load, ctx);
+                    }
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                return self.handle_key(KeyEvent::from(KeyCode::Down), ctx);
+            }
+            MouseEventKind::ScrollUp => {
+                return self.handle_key(KeyEvent::from(KeyCode::Up), ctx);
+            }
+            _ => {}
+        }
+        KeyOutcome::Consumed
+    }
+
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Context) {
         let block = panel::block("catalog", ctx.focused);
+        self.body = Rect::default();
         if ctx.connections().pool(&self.connection).is_none() {
             let message = Paragraph::new("Waiting for the connection…").style(theme::DIM);
             frame.render_widget(message.block(block), area);
@@ -146,6 +185,7 @@ impl Component for Catalog {
         if self.tree.begin_roots() {
             self.spawn(Vec::new(), Load::Catalogs, ctx);
         }
+        self.body = block.inner(area);
         let lines = self.tree.lines();
         self.selected = self.selected.min(lines.len().saturating_sub(1));
         let items = lines.into_iter().map(|line| {

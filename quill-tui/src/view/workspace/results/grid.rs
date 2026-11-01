@@ -21,7 +21,7 @@ use crate::{
     component::Context,
     task::{
         RunId,
-        page::{self, Page, TABLE},
+        page::{self, Cell, Page, TABLE},
         run::ResultDir,
     },
     widget::theme,
@@ -118,7 +118,7 @@ impl Grid {
     /// The full value under the cursor, if its page is loaded.
     pub fn cell(&self) -> Option<&str> {
         let row = self.pages.row(self.cursor_row)?;
-        row.cells.get(self.cursor_col).map(String::as_str)
+        row.cells.get(self.cursor_col).map(Cell::as_str)
     }
 
     pub fn column(&self) -> Option<&str> {
@@ -178,7 +178,7 @@ impl Grid {
                     Some(Inspector::new(
                         &self.columns[self.cursor_col],
                         row.row + 1,
-                        value,
+                        value.as_str(),
                     ))
                 });
                 return cell.map_or(GridOutcome::Consumed, GridOutcome::Inspect);
@@ -271,7 +271,7 @@ impl Grid {
                             .row(r)?
                             .cells
                             .get(i)
-                            .map(|c| columns::display_width(c))
+                            .map(|c| columns::display_width(c.display()))
                     })
                     .chain([columns::display_width(&header_name(name))])
                     .max()
@@ -315,9 +315,16 @@ impl Grid {
             let cells: Vec<Span> = match self.pages.row(r) {
                 Some(row) => drawn
                     .iter()
-                    .map(|&(i, width)| {
-                        let text = row.cells.get(i).map_or("", String::as_str);
-                        Span::raw(columns::fit(text, width))
+                    .map(|&(i, width)| match row.cells.get(i) {
+                        Some(cell) => {
+                            let text = columns::fit(cell.display(), width);
+                            if matches!(cell, Cell::Binary(_)) {
+                                Span::styled(text, theme::DIM)
+                            } else {
+                                Span::raw(text)
+                            }
+                        }
+                        None => Span::raw(""),
                     })
                     .collect(),
                 None => vec![Span::styled("…", theme::DIM)],

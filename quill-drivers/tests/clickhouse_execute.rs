@@ -148,3 +148,60 @@ async fn clickhouse_server_metrics() -> TestResult {
         .await?;
     denied
 }
+
+#[tokio::test]
+#[ignore = "requires Docker Compose ClickHouse"]
+async fn strings_preserve_arbitrary_bytes() -> TestResult {
+    use arrow::{
+        array::{Array, BinaryArray},
+        datatypes::DataType,
+    };
+    use futures::StreamExt;
+
+    let pool = ClickhouseConnectionPool::connect(&settings("quill")).await?;
+    let sql = "SELECT if(number % 3 = 0, NULL, if(number % 3 = 1, unhex('FF0080'), 'hello')) AS bytes FROM numbers(2500) SETTINGS max_block_size = 1000";
+    let mut execution = pool.execute(QueryRequest::new(sql)).await?;
+    let mut schema = None;
+    let mut rows = 0;
+    let mut batches = 0;
+    while let Some(event) = execution.events.next().await {
+        match event? {
+            QueryEvent::Schema { schema: value, .. } => {
+                assert_eq!(value.field(0).data_type(), &DataType::Binary);
+                assert!(value.field(0).is_nullable());
+                schema = Some(value);
+            }
+            QueryEvent::Batch { batch, .. } => {
+                assert_eq!(Some(batch.schema()), schema);
+                let values = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<BinaryArray>()
+                    .unwrap();
+                for i in 0..batch.num_rows() {
+                    match (rows + i) % 3 {
+                        0 => assert!(values.is_null(i)),
+                        1 => assert_eq!(values.value(i), &[0xff, 0x00, 0x80]),
+                        _ => assert_eq!(values.value(i), b"hello"),
+                    }
+                }
+                rows += batch.num_rows();
+                batches += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(rows, 2500);
+    assert!(batches > 1);
+
+    let mut cursor = pool.query_arrow("SELECT unhex('FF0080') AS bytes")?;
+    let batch = cursor.next().await?.ok_or("expected a batch")?;
+    assert_eq!(batch.schema().field(0).data_type(), &DataType::Binary);
+    let values = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .unwrap();
+    assert_eq!(values.value(0), &[0xff, 0x00, 0x80]);
+    Ok(())
+}

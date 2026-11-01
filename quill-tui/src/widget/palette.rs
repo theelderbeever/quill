@@ -1,5 +1,5 @@
 //! The `:` command and `/` filter line, which otherwise shows status.
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
     layout::{Position, Rect},
@@ -52,6 +52,32 @@ pub enum PaletteEvent {
 pub struct Palette {
     open: Option<(Mode, TextInput)>,
     flash: Option<Flash>,
+    completion: Option<Completion>,
+}
+
+struct Completion {
+    matches: Vec<String>,
+    next: usize,
+}
+
+impl Completion {
+    fn new(matches: Vec<String>) -> Self {
+        Self { matches, next: 0 }
+    }
+
+    fn common_prefix(&self) -> String {
+        let mut prefix = self.matches[0].clone();
+        for candidate in &self.matches[1..] {
+            let length = prefix
+                .chars()
+                .zip(candidate.chars())
+                .take_while(|(left, right)| left == right)
+                .map(|(character, _)| character.len_utf8())
+                .sum();
+            prefix.truncate(length);
+        }
+        prefix
+    }
 }
 
 impl Palette {
@@ -59,6 +85,7 @@ impl Palette {
         Self {
             open: None,
             flash: None,
+            completion: None,
         }
     }
 
@@ -73,6 +100,7 @@ impl Palette {
     pub fn open_with(&mut self, mode: Mode, text: &str) {
         self.open = Some((mode, TextInput::with_text(text)));
         self.flash = None;
+        self.completion = None;
     }
 
     pub fn flash(&mut self, flash: Flash) {
@@ -84,6 +112,27 @@ impl Palette {
             return PaletteEvent::None;
         };
         let mode = *mode;
+        if mode == Mode::Command && key.code == KeyCode::Tab {
+            if let Some(completion) = &mut self.completion {
+                *input = TextInput::with_text(&completion.matches[completion.next]);
+                completion.next = (completion.next + 1) % completion.matches.len();
+            } else {
+                match crate::path::SavePath::completions(input.text()) {
+                    Ok(matches) if !matches.is_empty() => {
+                        let completion = Completion::new(matches);
+                        *input = TextInput::with_text(&completion.common_prefix());
+                        if completion.matches.len() > 1 {
+                            self.completion = Some(completion);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.flash = Some(Flash::Error(error)),
+                }
+            }
+            return PaletteEvent::None;
+        }
+        self.completion = None;
+        self.flash = None;
         match (input.handle_key(key), mode) {
             (InputEvent::Submit, Mode::Command) => {
                 let text = input.text().to_owned();
@@ -118,7 +167,14 @@ impl Palette {
             Some((Mode::Where, _)) => "where",
             _ => "command",
         };
-        panel::block(title, self.is_open())
+        let block = panel::block(title, self.is_open());
+        if self.is_open()
+            && let Some(Flash::Error(error)) = &self.flash
+        {
+            block.title_bottom(Line::styled(error.clone(), theme::ERROR))
+        } else {
+            block
+        }
     }
 
     /// `status` (e.g. run progress) shows when the palette is closed, ahead
@@ -156,6 +212,62 @@ mod tests {
 
     fn press(palette: &mut Palette, code: KeyCode) -> PaletteEvent {
         palette.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn save_paths_complete_cycle_and_reset_after_editing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("résult a.csv"), "").unwrap();
+        std::fs::write(dir.path().join("résult b.csv"), "").unwrap();
+        std::fs::create_dir(dir.path().join("reports")).unwrap();
+        let prefix = format!("w {}/ré", dir.path().display());
+        let mut palette = Palette::new();
+        palette.open_with(Mode::Command, &prefix);
+        press(&mut palette, KeyCode::Tab);
+        assert_eq!(
+            palette.open.as_ref().unwrap().1.text(),
+            format!("w {}/résult ", dir.path().display())
+        );
+        press(&mut palette, KeyCode::Tab);
+        assert!(
+            palette
+                .open
+                .as_ref()
+                .unwrap()
+                .1
+                .text()
+                .ends_with("résult a.csv")
+        );
+        press(&mut palette, KeyCode::Tab);
+        assert!(
+            palette
+                .open
+                .as_ref()
+                .unwrap()
+                .1
+                .text()
+                .ends_with("résult b.csv")
+        );
+        press(&mut palette, KeyCode::Backspace);
+        assert!(palette.completion.is_none());
+        press(&mut palette, KeyCode::Tab);
+        assert!(
+            matches!(press(&mut palette, KeyCode::Enter), PaletteEvent::Command(text) if text.ends_with("résult b.csv"))
+        );
+        palette.open_with(Mode::Command, &format!("save {}/rep", dir.path().display()));
+        press(&mut palette, KeyCode::Tab);
+        assert!(
+            palette
+                .open
+                .as_ref()
+                .unwrap()
+                .1
+                .text()
+                .ends_with("reports/")
+        );
+        palette.open_with(Mode::Filter, &prefix);
+        press(&mut palette, KeyCode::Tab);
+        assert_eq!(palette.open.as_ref().unwrap().1.text(), prefix);
     }
 
     #[test]

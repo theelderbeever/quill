@@ -375,6 +375,9 @@ impl Component for Workspace {
     /// Dragging a border between panels resizes them. Otherwise a left
     /// click focuses the panel under it, and the event goes to that panel.
     fn handle_mouse(&mut self, event: MouseEvent, ctx: &Context) -> KeyOutcome {
+        if self.results.handle_overlay_mouse(event) {
+            return KeyOutcome::Consumed;
+        }
         let position = Position::new(event.column, event.row);
         match (event.kind, self.dragging) {
             (MouseEventKind::Drag(MouseButton::Left), Some(border)) => {
