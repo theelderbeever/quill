@@ -14,6 +14,12 @@ pub const ERROR: Style = Style::new().fg(Color::Red);
 pub const GROUP: Style = Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD);
 pub const BANNER: Style = Style::new().fg(Color::Black).bg(Color::Yellow);
 pub const GUTTER: Style = Style::new().fg(Color::DarkGray);
+pub const ACTIVE_TAB: Style = TITLE.add_modifier(Modifier::REVERSED);
+pub const DETAILS: Style = TITLE.fg(Color::Blue);
+/// Between tab names in the editor's top border.
+pub const TAB_SEPARATOR: &str = "│";
+/// After the name of a tab whose query is running.
+pub const RUNNING_MARKER: &str = "●";
 pub const CELL_CURSOR: Style = Style::new().fg(Color::Black).bg(Color::Cyan);
 
 /// Editor colours by tree-sitter capture name.

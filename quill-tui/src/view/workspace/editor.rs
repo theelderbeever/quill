@@ -9,6 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::{
     Frame,
     layout::{Position, Rect},
+    text::Line,
 };
 use ratatui_code_editor::{
     actions::{Action as EditAction, Delete, InsertText, MoveDown, MoveLeft, MoveRight, MoveUp},
@@ -21,7 +22,10 @@ use crate::{
 };
 
 const LANGUAGE: &str = "sql";
-const NORMAL_HINTS: &[KeyHint] = &[KeyHint::new("e", "edit"), KeyHint::new("hjkl", "move")];
+const INSERT_MARKER: &str = " -- INSERT -- ";
+/// Border columns the insert marker takes from the title.
+pub const INSERT_MARKER_WIDTH: u16 = INSERT_MARKER.len() as u16;
+const NORMAL_HINTS: &[KeyHint] = &[];
 const INSERT_HINTS: &[KeyHint] = &[
     KeyHint::new("esc", "stop editing"),
     KeyHint::new("ctrl-z/y", "undo/redo"),
@@ -130,12 +134,27 @@ impl Editor {
     pub fn mark_saved(&mut self, text: String) {
         self.saved = text;
     }
+
+    /// Draw with `title` in the top border; the insert marker sits at its right.
+    pub fn render_titled(&mut self, frame: &mut Frame, area: Rect, ctx: &Context, title: Line) {
+        let mut block = panel::frame(ctx.focused).title(title);
+        if self.mode == Mode::Insert {
+            block = block.title_top(Line::styled(INSERT_MARKER, theme::TITLE).right_aligned());
+        }
+        self.area = block.inner(area);
+        frame.render_widget(block, area);
+        frame.render_widget(&self.inner, self.area);
+        if ctx.focused
+            && let Some((x, y)) = self.inner.get_visible_cursor(&self.area)
+        {
+            frame.set_cursor_position(Position::new(x, y));
+        }
+    }
 }
 
 impl Component for Editor {
     fn handle_key(&mut self, key: KeyEvent, _ctx: &Context) -> KeyOutcome {
         match (self.mode, key.code) {
-            (Mode::Normal, KeyCode::Char('i' | 'e')) => self.mode = Mode::Insert,
             (Mode::Normal, KeyCode::Char('h') | KeyCode::Left) => {
                 self.inner.apply(MoveLeft { shift: false });
             }
@@ -188,19 +207,7 @@ impl Component for Editor {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &Context) {
-        let title = match self.mode {
-            Mode::Normal => "editor",
-            Mode::Insert => "editor -- INSERT --",
-        };
-        let block = panel::block(title, ctx.focused);
-        self.area = block.inner(area);
-        frame.render_widget(block, area);
-        frame.render_widget(&self.inner, self.area);
-        if ctx.focused
-            && let Some((x, y)) = self.inner.get_visible_cursor(&self.area)
-        {
-            frame.set_cursor_position(Position::new(x, y));
-        }
+        self.render_titled(frame, area, ctx, Line::styled(" editor ", theme::TITLE));
     }
 
     fn hints(&self) -> &'static [KeyHint] {

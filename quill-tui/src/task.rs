@@ -67,3 +67,18 @@ pub enum RunMsg {
         result: anyhow::Result<()>,
     },
 }
+
+impl RunMsg {
+    /// The run this update belongs to; `None` for one tied to no run.
+    pub const fn run(&self) -> Option<RunId> {
+        match self {
+            Self::Started { run, .. }
+            | Self::Finished { run, .. }
+            | Self::Page { run, .. }
+            | Self::Profile { run, .. }
+            | Self::ServerMetrics { run, .. } => Some(*run),
+            Self::Derived { base, .. } => Some(*base),
+            Self::Saved { .. } => None,
+        }
+    }
+}

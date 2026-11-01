@@ -56,6 +56,7 @@ pub struct Options {
 /// # use quill_tui::{ConnectionGroup, ConnectionSource, Connections, Options};
 /// # struct Offline;
 /// # impl ConnectionSource for Offline {
+/// #     fn user(&self) -> Option<&str> { None }
 /// #     fn kind(&self) -> &'static str { "offline" }
 /// #     fn connect(&self) -> PoolFuture<'_, Arc<dyn ConnectionPool>> {
 /// #         Box::pin(async { Err(Error::UnsupportedOperation("connect")) })

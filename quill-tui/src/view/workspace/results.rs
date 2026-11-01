@@ -30,7 +30,6 @@ use grid::{Grid, GridOutcome};
 use inspector::{Inspector, InspectorOutcome};
 
 const GRID_HINTS: &[KeyHint] = &[
-    KeyHint::new("hjkl", "move"),
     KeyHint::new("enter", "inspect"),
     KeyHint::new("y", "copy cell"),
     KeyHint::new("s", "sort"),
@@ -166,6 +165,14 @@ impl Results {
         self.banner = None;
         self.set = None;
         self.inspector = None;
+    }
+
+    /// Whether `run` is the shown result or the view drawn from it.
+    pub fn owns(&self, run: RunId) -> bool {
+        match &self.state {
+            State::Ready(ready) => ready.base.run == run || ready.grid.run() == run,
+            _ => false,
+        }
     }
 
     pub const fn has_grid(&self) -> bool {

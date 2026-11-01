@@ -13,7 +13,12 @@ use crate::{
     view::View,
 };
 
-pub const HEIGHT: u16 = logo::LOGO.len() as u16;
+const DETAILS_HEIGHT: u16 = 6;
+pub const HEIGHT: u16 = if DETAILS_HEIGHT > logo::LOGO.len() as u16 {
+    DETAILS_HEIGHT
+} else {
+    logo::LOGO.len() as u16
+};
 const DETAILS_WIDTH: u16 = 36;
 const HINT_GAP: u16 = 3;
 
@@ -26,12 +31,12 @@ pub struct Header<'a> {
 
 impl Header<'_> {
     fn details(&self) -> Vec<Line<'_>> {
-        let breadcrumb = self
-            .view
-            .breadcrumb()
-            .map(Span::raw)
-            .flat_map(|crumb| [Span::styled(" › ", theme::DIM), crumb])
-            .skip(1);
+        // let breadcrumb = self
+        //     .view
+        //     .breadcrumb()
+        //     .map(Span::raw)
+        //     .flat_map(|crumb| [Span::styled(" › ", theme::DIM), crumb])
+        //     .skip(1);
         let Some(id) = self.view.connection() else {
             return vec![
                 Line::styled("quill", theme::TITLE),
@@ -53,13 +58,26 @@ impl Header<'_> {
         });
         vec![
             Line::from(vec![
-                Span::styled(id.name(), theme::TITLE),
-                Span::styled(" · ", theme::DIM),
+                Span::styled("Connection: ", theme::DETAILS),
+                Span::raw(id.name()),
+            ]),
+            Line::from_iter([
+                Span::styled("Kind:       ", theme::DETAILS),
                 Span::raw(self.connections.kind(id)),
             ]),
-            Line::from(status),
-            Line::from_iter(breadcrumb),
-            Line::styled(self.connections.label(id), theme::DIM),
+            Line::from_iter([Span::styled("Status:     ", theme::DETAILS), status]),
+            Line::from_iter([
+                Span::styled("User:       ", theme::DETAILS),
+                Span::raw(self.connections.user(id)),
+            ]),
+            Line::from_iter([
+                Span::styled("Host:       ", theme::DETAILS),
+                Span::raw(self.connections.host(id)),
+            ]),
+            Line::from_iter([
+                Span::styled("Database:   ", theme::DETAILS),
+                Span::raw(self.connections.database(id)),
+            ]),
         ]
     }
 

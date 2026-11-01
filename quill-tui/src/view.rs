@@ -72,18 +72,6 @@ impl View {
         }
     }
 
-    /// Path to this view, e.g. `pg_prod › daily_revenue`.
-    pub fn breadcrumb(&self) -> impl Iterator<Item = &str> {
-        let query = match self {
-            Self::Workspace(view) => Some(view.query().as_str()),
-            _ => None,
-        };
-        self.connection()
-            .map(ConnectionId::name)
-            .into_iter()
-            .chain(query)
-    }
-
     /// What `/` edits here, with the current text: a live list filter or
     /// a results condition.
     pub fn filter_mode(&self) -> Option<(Mode, &str)> {

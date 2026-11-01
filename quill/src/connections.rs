@@ -1,5 +1,6 @@
 //! Connection files. Each file is read on its own; files never overlay.
 use std::{
+    borrow::Cow,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -65,6 +66,42 @@ impl ConnectionSettings {
         }
     }
 
+    /// The `user` discriminant as written in config.
+    pub fn user(&self) -> Option<&str> {
+        match self {
+            Self::Datafusion(_) | Self::Sqlite(_) => None,
+            Self::Postgres(settings) => Some(settings.user.as_str()),
+            Self::Mysql(settings) => Some(settings.user.as_str()),
+            Self::Clickhouse(settings) => settings.user.as_deref(),
+            Self::Scylla(settings) => settings.user.as_deref(),
+        }
+    }
+
+    /// Where the data lives: the server, the Scylla nodes, or DataFusion's
+    /// object stores.
+    pub fn host(&self) -> Option<Cow<'_, str>> {
+        match self {
+            Self::Sqlite(_) => None,
+            Self::Postgres(s) => Some(Cow::Owned(format!("{}:{}", s.host, s.port))),
+            Self::Mysql(s) => Some(Cow::Owned(format!("{}:{}", s.host, s.port))),
+            Self::Clickhouse(s) => Some(Cow::Borrowed(&s.host)),
+            Self::Scylla(s) => listed(s.nodes.iter().map(String::as_str)),
+            Self::Datafusion(s) => listed(s.object_stores.iter().map(|o| o.provider.location())),
+        }
+    }
+
+    /// The database, or its equivalent: Scylla's keyspace, SQLite's file.
+    pub fn database(&self) -> Option<&str> {
+        match self {
+            Self::Datafusion(_) => None,
+            Self::Postgres(s) => Some(&s.database),
+            Self::Mysql(s) => Some(&s.database),
+            Self::Clickhouse(s) => Some(&s.database),
+            Self::Scylla(s) => s.keyspace.as_deref(),
+            Self::Sqlite(s) => s.path.to_str(),
+        }
+    }
+
     pub async fn connect(&self) -> Result<Arc<dyn ConnectionPool>> {
         Ok(match self {
             Self::Datafusion(s) => Arc::new(DatafusionConnectionPool::connect(s).await?),
@@ -78,14 +115,36 @@ impl ConnectionSettings {
 }
 
 /// A connection with its query directory resolved against its file.
+/// The first of `items`, with a count of the rest; `None` when empty.
+fn listed<'a>(mut items: impl ExactSizeIterator<Item = &'a str>) -> Option<Cow<'a, str>> {
+    let rest = items.len().checked_sub(1)?;
+    let first = items.next()?;
+    Some(match rest {
+        0 => Cow::Borrowed(first),
+        n => Cow::Owned(format!("{first} +{n}")),
+    })
+}
+
 pub struct ResolvedConnection {
     settings: ConnectionSettings,
     query_dir: PathBuf,
 }
 
 impl ConnectionSource for ResolvedConnection {
+    fn user(&self) -> Option<&str> {
+        self.settings.user()
+    }
+
     fn kind(&self) -> &'static str {
         self.settings.kind()
+    }
+
+    fn host(&self) -> Option<Cow<'_, str>> {
+        self.settings.host()
+    }
+
+    fn database(&self) -> Option<&str> {
+        self.settings.database()
     }
 
     fn connect(&self) -> PoolFuture<'_, Arc<dyn ConnectionPool>> {
@@ -202,6 +261,44 @@ mod tests {
             .unwrap()
             .unwrap()
             .into_group(home)
+    }
+
+    #[test]
+    fn details_show_each_drivers_host_and_database() {
+        let toml = r#"
+            [connection.pg]
+            kind = "postgres"
+            host = "db"
+            database = "app"
+            user = "me"
+            [connection.lite]
+            kind = "sqlite"
+            path = "/tmp/app.db"
+            [connection.cass]
+            kind = "scylla"
+            nodes = ["a:9042", "b:9042", "c:9042"]
+            keyspace = "events"
+            [connection.lake]
+            kind = "datafusion"
+            [[connection.lake.object_stores]]
+            kind = "local"
+            path = "/data"
+        "#;
+        let file: ConnectionsToml = toml::from_str(toml).unwrap();
+        let details: Vec<_> = file
+            .connection
+            .values()
+            .map(|c| (c.driver.host(), c.driver.database()))
+            .collect();
+        assert_eq!(
+            details,
+            [
+                (Some("db:5432".into()), Some("app")),
+                (None, Some("/tmp/app.db")),
+                (Some("a:9042 +2".into()), Some("events")),
+                (Some("/data".into()), None),
+            ]
+        );
     }
 
     #[test]
