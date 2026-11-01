@@ -95,6 +95,22 @@ pub enum ObjectStoreProvider {
     },
 }
 
+impl ObjectStoreProvider {
+    /// The store's URL, or its directory for a local store.
+    ///
+    /// ```
+    /// # use quill_drivers::datafusion::ObjectStoreProvider;
+    /// let local = ObjectStoreProvider::Local { path: "/data".into() };
+    /// assert_eq!(local.location(), "/data");
+    /// ```
+    pub fn location(&self) -> &str {
+        match self {
+            Self::Local { path } => path.to_str().unwrap_or_default(),
+            Self::Aws { url, .. } | Self::Azure { url, .. } | Self::Gcp { url, .. } => url.as_str(),
+        }
+    }
+}
+
 impl ObjectStoreSettings {
     pub(super) fn build(
         &self,

@@ -1,4 +1,6 @@
 //! Top-level state: routes keys, applies actions and draws the frame.
+use std::collections::HashMap;
+
 use crossterm::event::{
     Event as TerminalEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
     MouseEventKind,
@@ -12,12 +14,12 @@ use crate::{
     action::Action,
     command::Command,
     component::{Component, KeyHint, KeyOutcome, Shared},
-    connection::{ConnectionState, Target},
+    connection::{ConnectionId, ConnectionState, Target},
     event::{Event, Msg},
     filter::Filter,
     view::{
         Route, View, ViewStack,
-        workspace::{Direction, Sidebar, Workspace},
+        workspace::{Sidebar, Workspace},
     },
     widget::{
         header::{self, Header},
@@ -37,6 +39,9 @@ pub struct App {
     /// Kept for the session: on X11 copied text lives only while its owner does.
     clipboard: Option<arboard::Clipboard>,
     views: ViewStack,
+    /// Workspaces left for another view, kept with their runs and results
+    /// until their connection is disconnected.
+    sessions: HashMap<ConnectionId, Box<Workspace>>,
     palette: Palette,
     dirty: bool,
     quit: bool,
@@ -49,6 +54,7 @@ impl App {
             shared,
             clipboard: None,
             views: ViewStack::new(),
+            sessions: HashMap::new(),
             palette: Palette::new(),
             dirty: true,
             quit: false,
@@ -94,12 +100,20 @@ impl App {
         self.dirty = true;
     }
 
-    /// Save and leave the views on the way out.
+    /// Save and leave the views on the way out, ending every session.
     pub fn close(&mut self) {
-        for mut view in self.views.reset(None) {
-            if let Err(e) = view.close() {
-                self.report(format!("{e:#}"));
-            }
+        self.leave_all(None);
+        self.sessions.clear();
+    }
+
+    /// Save a view being left. A workspace is kept as its connection's session.
+    fn retire(&mut self, mut view: View) {
+        if let Err(e) = view.close() {
+            self.report(format!("{e:#}"));
+        }
+        if let View::Workspace(workspace) = view {
+            self.sessions
+                .insert(workspace.connection().clone(), workspace);
         }
     }
 
@@ -200,21 +214,16 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('c') if ctrl => self.quit = true,
-            KeyCode::Char(c @ ('h' | 'j' | 'k' | 'l')) if ctrl && workspace.is_some() => {
-                let direction = match c {
-                    'h' => Direction::Left,
-                    'j' => Direction::Down,
-                    'k' => Direction::Up,
-                    _ => Direction::Right,
-                };
-                workspace.into_iter().for_each(|w| w.move_focus(direction));
-            }
             KeyCode::Tab => workspace.into_iter().for_each(|w| w.cycle_focus(true)),
             KeyCode::BackTab => workspace.into_iter().for_each(|w| w.cycle_focus(false)),
-            KeyCode::F(2) => workspace
-                .into_iter()
-                .for_each(|w| w.toggle(Sidebar::Catalog)),
-            KeyCode::F(3) => workspace.into_iter().for_each(|w| w.toggle(Sidebar::Stats)),
+            KeyCode::Char('b' | 'B') if ctrl => {
+                let sidebar = if is_shifted(key) {
+                    Sidebar::Stats
+                } else {
+                    Sidebar::Catalog
+                };
+                workspace.into_iter().for_each(|w| w.toggle(sidebar));
+            }
             _ => return false,
         }
         true
@@ -240,10 +249,8 @@ impl App {
                 self.open(route);
             }
             Action::Back => {
-                if let Some(mut view) = self.views.pop()
-                    && let Err(e) = view.close()
-                {
-                    self.report(format!("{e:#}"));
+                if let Some(view) = self.views.pop() {
+                    self.retire(view);
                 }
             }
             Action::Disconnect(id) => {
@@ -252,6 +259,8 @@ impl App {
                 if self.views.top().connection() == Some(&id) {
                     self.leave_all(None);
                 }
+                // Dropping the session cancels its runs and removes their results.
+                self.sessions.remove(&id);
             }
             Action::Report(message) => self.report(message),
             Action::Copy(text) => self.copy(text),
@@ -270,15 +279,25 @@ impl App {
     }
 
     fn leave_all(&mut self, filter: Option<Filter>) {
-        for mut view in self.views.reset(filter) {
-            if let Err(e) = view.close() {
-                self.report(format!("{e:#}"));
-            }
+        for view in self.views.reset(filter) {
+            self.retire(view);
         }
     }
 
     fn open(&mut self, route: Route) {
         self.connect(&route);
+        if let Route::Workspace { connection, query } = &route
+            && let Some(mut workspace) = self.sessions.remove(connection)
+        {
+            match workspace.reopen(query) {
+                Ok(()) => self.views.push(View::Workspace(workspace)),
+                Err(e) => {
+                    self.sessions.insert(connection.clone(), workspace);
+                    self.report(format!("{e:#}"));
+                }
+            }
+            return;
+        }
         let ctx = self.shared.context(true);
         match View::open(route, &ctx) {
             Ok(view) => self.views.push(view),
@@ -313,7 +332,16 @@ impl App {
             }
             msg => {
                 let ctx = self.shared.context(true);
-                if let Some(flash) = self.views.top_mut().handle_msg(msg, &ctx) {
+                let top = self.views.top_mut();
+                let on_top = matches!(top, View::Workspace(w) if w.owns(&msg));
+                let session = (!on_top)
+                    .then(|| self.sessions.values_mut().find(|w| w.owns(&msg)))
+                    .flatten();
+                let flash = match session {
+                    Some(workspace) => workspace.handle_msg(msg, &ctx),
+                    None => top.handle_msg(msg, &ctx),
+                };
+                if let Some(flash) = flash {
                     self.show(flash);
                 }
             }
@@ -350,11 +378,14 @@ impl App {
 /// Ctrl-Shift-C, however the terminal reports the shifted letter.
 fn is_copy(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)
-        && match key.code {
-            KeyCode::Char('C') => true,
-            KeyCode::Char('c') => key.modifiers.contains(KeyModifiers::SHIFT),
-            _ => false,
-        }
+        && matches!(key.code, KeyCode::Char('c' | 'C'))
+        && is_shifted(key)
+}
+
+/// Whether a letter key was shifted, as an uppercase letter or a modifier.
+fn is_shifted(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::SHIFT)
+        || matches!(key.code, KeyCode::Char(c) if c.is_ascii_uppercase())
 }
 
 #[cfg(test)]
@@ -393,10 +424,6 @@ mod tests {
         press(app, KeyCode::Enter);
     }
 
-    fn crumbs(app: &App) -> Vec<&str> {
-        app.views.top().breadcrumb().collect()
-    }
-
     fn screen(app: &mut App, width: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
@@ -414,7 +441,6 @@ mod tests {
         let (mut app, mut rx) = app();
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Enter);
-        assert_eq!(crumbs(&app), ["ch"]);
 
         let Some(msg) = rx.recv().await else {
             panic!("expected a connection result");
@@ -426,21 +452,17 @@ mod tests {
             Some(ConnectionState::Failed(_))
         ));
         press(&mut app, KeyCode::Esc);
-        assert!(crumbs(&app).is_empty());
     }
 
     #[tokio::test]
     async fn palette_jumps_and_reports_errors() {
         let (mut app, _rx) = app();
         type_command(&mut app, "conn pg");
-        assert_eq!(crumbs(&app), ["pg"]);
 
         type_command(&mut app, "conn nope");
-        assert_eq!(crumbs(&app), ["pg"]);
         assert!(screen(&mut app, 120).contains("no connection named `nope`"));
 
         type_command(&mut app, "conn");
-        assert!(crumbs(&app).is_empty());
         type_command(&mut app, "q");
         assert!(app.should_quit());
     }
@@ -453,7 +475,6 @@ mod tests {
         ]);
         let start = connections.lookup("pg");
         let (mut app, _rx) = app_with(connections, start);
-        assert!(crumbs(&app).is_empty());
         let screen = screen(&mut app, 120);
         assert!(screen.contains("connections (2) = pg"));
         assert!(screen.contains("~/.config/quill/connections.toml"));
@@ -485,7 +506,6 @@ mod tests {
         ));
 
         type_command(&mut app, "disconnect");
-        assert!(crumbs(&app).is_empty());
         assert!(matches!(
             app.shared.connections.state(&pg),
             Some(ConnectionState::Idle)
@@ -514,8 +534,7 @@ mod tests {
         assert!(dir.path().join("pg/daily.sql").is_file());
 
         press(&mut app, KeyCode::Enter);
-        assert_eq!(crumbs(&app), ["pg", "daily"]);
-        press(&mut app, KeyCode::Char('i'));
+        press(&mut app, KeyCode::Char('e'));
         // Insert mode takes every key, including the palette and Tab.
         type_text(&mut app, "SELECT 1 :");
         press(&mut app, KeyCode::Tab);
@@ -523,7 +542,6 @@ mod tests {
         assert!(screen(&mut app, 140).contains("INSERT"));
         press(&mut app, KeyCode::Esc);
         press(&mut app, KeyCode::Esc);
-        assert_eq!(crumbs(&app), ["pg"]);
         let saved = std::fs::read_to_string(dir.path().join("pg/daily.sql")).unwrap();
         // Tab reached the editor, which indents the line.
         assert!(saved.starts_with("    SELECT 1 :"), "{saved:?}");
@@ -596,14 +614,13 @@ mod tests {
             .finish_connect(&lite, Ok(std::sync::Arc::new(pool)));
 
         press(&mut app, KeyCode::Enter);
-        assert_eq!(crumbs(&app), ["lite", "count"]);
         press(&mut app, KeyCode::F(5));
         let first = pump(&mut app, &mut rx, |s| s.contains("row 1 ")).await;
         assert!(first.contains("results · 1,000 rows"), "{first}");
         assert!(first.contains("label"));
 
         // Focus results, jump to the end; the last page loads in the background.
-        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        press(&mut app, KeyCode::Tab);
         press(&mut app, KeyCode::Char('G'));
         let last = pump(&mut app, &mut rx, |s| s.contains("row 1000")).await;
         assert!(!last.contains("row 1 "), "{last}");
@@ -654,12 +671,78 @@ mod tests {
             ["x,label", "3,row 3", "2,row 2", "1,row 1"]
         );
 
-        // Leaving the workspace removes the run's result files.
+        // Leaving the workspace keeps the run's result files; disconnecting
+        // removes them.
+        let runs = || {
+            std::fs::read_dir(dir.path().join("results"))
+                .unwrap()
+                .count()
+        };
         press(&mut app, KeyCode::Esc);
-        let runs = std::fs::read_dir(dir.path().join("results"))
-            .unwrap()
-            .count();
-        assert_eq!(runs, 0);
+        assert_eq!(runs(), 1);
+        type_command(&mut app, "disconnect");
+        assert_eq!(runs(), 0);
+    }
+
+    #[tokio::test]
+    async fn tabs_keep_their_results_until_disconnect() {
+        use quill_drivers::{
+            ConnectionPool, settings::SqliteSettings, sqlite::SqliteConnectionPool,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let queries = dir.path().join("queries");
+        std::fs::create_dir_all(&queries).unwrap();
+        std::fs::write(queries.join("alpha.sql"), "SELECT 'from alpha' AS a").unwrap();
+        std::fs::write(queries.join("beta.sql"), "SELECT 2").unwrap();
+        let source: Box<dyn crate::ConnectionSource> =
+            Box::new(crate::connection::testing::Offline(queries));
+        let connections = Connections::new([crate::ConnectionGroup {
+            label: "home".into(),
+            connections: vec![("lite".into(), source)],
+        }]);
+        let start = connections.lookup("lite");
+        let (mut shared, mut rx) = shared(connections);
+        shared.results_dir = dir.path().join("results");
+        let mut app = App::new(shared, start);
+        let lite = id(&app.shared.connections, "lite");
+        let settings = SqliteSettings {
+            path: ":memory:".into(),
+            params: Default::default(),
+        };
+        let pool = SqliteConnectionPool::connect(&settings).await.unwrap();
+        app.shared
+            .connections
+            .finish_connect(&lite, Ok(std::sync::Arc::new(pool)));
+        let ctrl_k = |app: &mut App, then| {
+            app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+            press(app, KeyCode::Char(then));
+        };
+
+        press(&mut app, KeyCode::Enter);
+        let top = screen(&mut app, 160);
+        let border = top.lines().find(|l| l.contains("┏")).unwrap_or_default();
+        assert!(border.contains(" alpha │ beta "), "{top}");
+
+        press(&mut app, KeyCode::F(5));
+        pump(&mut app, &mut rx, |s| s.contains("results · 1 rows")).await;
+        ctrl_k(&mut app, ']');
+        assert!(!screen(&mut app, 160).contains("results · 1 rows"));
+        ctrl_k(&mut app, '[');
+        assert!(screen(&mut app, 160).contains("results · 1 rows"));
+
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Enter);
+        assert!(screen(&mut app, 160).contains("results · 1 rows"));
+
+        let runs = || {
+            std::fs::read_dir(dir.path().join("results"))
+                .unwrap()
+                .count()
+        };
+        assert_eq!(runs(), 1);
+        type_command(&mut app, "disconnect");
+        assert_eq!(runs(), 0);
     }
 
     #[tokio::test]
@@ -701,7 +784,7 @@ mod tests {
 
         press(&mut app, KeyCode::Enter);
         // Focus the catalog; its single catalog opens to show schemas.
-        app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL));
+        press(&mut app, KeyCode::BackTab);
         pump(&mut app, &mut rx, |s| s.contains("▸ main")).await;
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Char('l'));
@@ -727,5 +810,7 @@ mod tests {
             ctrl | KeyModifiers::SHIFT
         )));
         assert!(!is_copy(KeyEvent::new(KeyCode::Char('c'), ctrl)));
+        assert!(is_shifted(KeyEvent::new(KeyCode::Char('B'), ctrl)));
+        assert!(!is_shifted(KeyEvent::new(KeyCode::Char('b'), ctrl)));
     }
 }

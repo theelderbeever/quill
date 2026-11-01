@@ -1,35 +1,38 @@
-//! One open query: catalog tree, editor, results and statistics.
+//! A connection's query session: a tab per saved query, each with its own
+//! editor, results and statistics, beside a shared catalog tree.
 mod catalog;
 mod editor;
 mod layout;
 mod results;
 mod stats;
+mod tab;
 
-use std::{path::Path, time::Instant};
+use std::{ops::Range, path::Path, time::Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
     Frame,
     layout::{Position, Rect},
-    text::{Line, Span},
+    text::Line,
 };
 
 use crate::{
     action::Action,
     component::{Component, Context, KeyHint, KeyOutcome},
-    connection::{ConnectionId, ConnectionState},
+    connection::ConnectionId,
     event::Msg,
-    format,
     store::queries::{QueryName, QueryStore},
-    task::{RunMsg, run::Run, stats as stats_task},
-    widget::{palette::Flash, theme},
+    widget::{
+        input::{InputEvent, TextInput},
+        palette::Flash,
+        prompt,
+    },
 };
 use catalog::Catalog;
 use editor::Editor;
 pub use layout::Sidebar;
 use layout::{Border, Sizes, Visibility, WorkspaceLayout};
-use results::Results;
-use stats::Stats;
+use tab::{QueryTab, Tabs};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
@@ -50,34 +53,32 @@ impl Panel {
             Self::Editor | Self::Results => None,
         }
     }
-
-    /// The panel to focus from this one. Catalog and stats span the full
-    /// height, so up and down always mean editor and results.
-    const fn neighbour(self, direction: Direction) -> Option<Self> {
-        use Direction::*;
-        match (self, direction) {
-            (_, Up) | (Self::Catalog, Right) | (Self::Stats, Left) => Some(Self::Editor),
-            (_, Down) => Some(Self::Results),
-            (Self::Editor | Self::Results, Left) => Some(Self::Catalog),
-            (Self::Editor | Self::Results, Right) => Some(Self::Stats),
-            _ => None,
-        }
-    }
 }
 
-/// A direction to move focus across the layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    Left,
-    Down,
-    Up,
-    Right,
+const PROMPT_HINTS: &[KeyHint] = &[
+    KeyHint::new("enter", "confirm"),
+    KeyHint::new("esc", "cancel"),
+];
+const HELP_HINTS: &[KeyHint] = &[KeyHint::new("?/esc", "close help")];
+/// Keys listed only in the `?` dialog, to keep the header short.
+const HELP: &[KeyHint] = &[
+    KeyHint::new("hjkl", "move"),
+    KeyHint::new("alt-hjkl", "resize"),
+    KeyHint::new("ctrl-b", "catalog"),
+    KeyHint::new("ctrl-shift-b", "stats"),
+];
+
+/// A dialog over the workspace, taking every key until it closes.
+enum Prompt {
+    New(TextInput),
+    Delete(QueryName),
+    Help,
 }
 
 pub struct Workspace {
     connection: ConnectionId,
-    query: QueryName,
     store: QueryStore,
+    tabs: Tabs,
     focus: Panel,
     visibility: Visibility,
     sizes: Sizes,
@@ -87,191 +88,185 @@ pub struct Workspace {
     width: u16,
     /// Panel areas at the last draw, for mouse hit testing.
     layout: Option<WorkspaceLayout>,
-    run: Option<Run>,
+    /// Columns of each tab title at the last draw, for mouse hit testing.
+    tab_hits: Vec<(Range<u16>, usize)>,
+    prompt: Option<Prompt>,
     catalog: Catalog,
-    editor: Editor,
-    results: Results,
-    stats: Stats,
 }
 
 impl Workspace {
     pub const HINTS: &[KeyHint] = &[
         KeyHint::new("F5", "run"),
-        KeyHint::new("i", "edit"),
+        KeyHint::new("e", "edit"),
         KeyHint::new("tab", "focus"),
-        KeyHint::new("ctrl-hjkl", "move focus"),
-        KeyHint::new("alt-hjkl", "resize"),
-        KeyHint::new("F2", "catalog"),
-        KeyHint::new("F3", "stats"),
+        KeyHint::new("[/]", "last/next query"),
+        KeyHint::new("n", "new query"),
+        KeyHint::new("d", "delete query"),
+        KeyHint::new("?", "help"),
     ];
 
-    /// Open `query`, resuming its saved text.
+    /// Open every saved query on `connection` as a tab, selecting `query`.
     pub fn open(connection: ConnectionId, query: QueryName, ctx: &Context) -> anyhow::Result<Self> {
         let store = QueryStore::new(ctx.connections().query_dir(&connection));
-        let editor = Editor::new(store.read(&query)?)?;
-        Ok(Self::new(connection, query, store, editor))
+        let mut tabs = Tabs::new(QueryTab::open(query.clone(), &store)?);
+        tabs.sync(&store.list()?, &query, &store)?;
+        Ok(Self::new(connection, store, tabs))
     }
 
-    fn new(connection: ConnectionId, query: QueryName, store: QueryStore, editor: Editor) -> Self {
+    fn new(connection: ConnectionId, store: QueryStore, tabs: Tabs) -> Self {
         Self {
             catalog: Catalog::new(connection.clone()),
             connection,
-            query,
             store,
+            tabs,
             focus: Panel::Editor,
             visibility: Visibility::AUTO,
             sizes: Sizes::DEFAULT,
             dragging: None,
             width: u16::MAX,
             layout: None,
-            run: None,
-            editor,
-            results: Results::new(),
-            stats: Stats::new(),
+            tab_hits: Vec::new(),
+            prompt: None,
         }
+    }
+
+    /// Return to the session at `query`, picking up queries added, renamed
+    /// or deleted since it was left.
+    pub fn reopen(&mut self, query: &QueryName) -> anyhow::Result<()> {
+        self.tabs.sync(&self.store.list()?, query, &self.store)
     }
 
     pub const fn connection(&self) -> &ConnectionId {
         &self.connection
     }
 
-    pub const fn query(&self) -> &QueryName {
-        &self.query
+    pub fn query(&self) -> &QueryName {
+        self.tabs.active().query()
     }
 
-    /// Save unsaved text and stop any running query.
+    /// Save unsaved text in every tab. Runs and results live on.
     pub fn close(&mut self) -> anyhow::Result<()> {
-        self.run = None;
-        self.save_if(|editor| editor.unsaved())
+        for tab in self.tabs.iter_mut() {
+            tab.save_if(&self.store, Editor::unsaved)?;
+        }
+        Ok(())
     }
 
     /// Autosave once edits have paused. Returns true while a query runs, so
     /// its progress keeps redrawing.
     pub fn tick(&mut self, ctx: &Context) -> anyhow::Result<bool> {
-        let delay = ctx.options().autosave;
-        self.save_if(|editor| editor.due(Instant::now(), delay))?;
-        Ok(self.run.is_some())
+        let (now, delay) = (Instant::now(), ctx.options().autosave);
+        for tab in self.tabs.iter_mut() {
+            tab.save_if(&self.store, |editor| editor.due(now, delay))?;
+        }
+        Ok(self.tabs.iter().any(QueryTab::is_running))
     }
 
-    fn save_if(&mut self, text: impl FnOnce(&mut Editor) -> Option<String>) -> anyhow::Result<()> {
-        if let Some(text) = text(&mut self.editor) {
-            self.store.write(&self.query, &text)?;
-            self.editor.mark_saved(text);
+    /// Whether `msg` is for this session.
+    pub fn owns(&self, msg: &Msg) -> bool {
+        match msg {
+            Msg::Catalog(msg) => msg.connection == self.connection,
+            Msg::Run(msg) => msg
+                .run()
+                .is_none_or(|run| self.tabs.iter().any(|t| t.owns(run))),
+            Msg::Connected { .. } => false,
         }
-        Ok(())
     }
 
     /// Apply a background update. Returns a message to show, if any.
     pub fn handle_msg(&mut self, msg: Msg, ctx: &Context) -> Option<Flash> {
-        let msg = match msg {
+        match msg {
             Msg::Catalog(msg) => {
                 self.catalog.handle_msg(msg, ctx);
-                return None;
+                None
             }
-            Msg::Run(msg) => msg,
-            Msg::Connected { .. } => return None,
-        };
-        match msg {
-            RunMsg::Started {
-                run,
-                query,
-                control,
-            } => {
-                if let Some(current) = self.run.as_mut().filter(|r| r.id() == run) {
-                    current.attach(query, control);
-                }
+            Msg::Run(msg) => {
+                let tab = match msg.run() {
+                    Some(run) => self.tabs.find_run_mut(run)?,
+                    None => self.tabs.active_mut(),
+                };
+                tab.handle_msg(msg, &self.connection, ctx)
             }
-            RunMsg::Finished { run, result } => {
-                if self.run.as_ref().is_some_and(|r| r.id() == run)
-                    && let Some(finished) = self.run.take()
-                {
-                    let (client, sink) = finished.metrics();
-                    let pool = ctx.connections().pool(&self.connection);
-                    let lookup = finished.query().zip(pool);
-                    self.stats.finished(run, client, sink, lookup.is_some());
-                    if let Some((query, pool)) = lookup {
-                        stats_task::spawn_server_metrics(
-                            pool,
-                            query,
-                            run,
-                            ctx.shared.messages.clone(),
-                        );
-                    }
-                    self.results.finish(run, finished.dir(), result, ctx);
-                }
-            }
-            RunMsg::Page { run, index, result } => return self.results.page(run, index, result),
-            RunMsg::Profile { run, result } => self.stats.profile(run, result),
-            RunMsg::ServerMetrics { run, result } => self.stats.server(run, result),
-            RunMsg::Derived { base, view, result } => {
-                return self.results.derived(base, view, result, ctx);
-            }
-            RunMsg::Saved { path, result } => {
-                return Some(match result {
-                    Ok(()) => Flash::Info(format!("saved {}", path.display())),
-                    Err(e) => Flash::Error(format!("save failed: {e:#}")),
-                });
-            }
+            Msg::Connected { .. } => None,
         }
-        None
     }
 
     /// Whether `/` should edit a results condition: the results have focus
     /// and hold rows. Returns the current condition.
     pub fn filter(&self) -> Option<&str> {
-        (self.focus == Panel::Results && self.results.has_grid()).then(|| self.results.filter())
+        let results = &self.tabs.active().results;
+        (self.focus == Panel::Results && results.has_grid()).then(|| results.filter())
     }
 
     pub fn set_filter(&mut self, filter: String, ctx: &Context) -> Option<Flash> {
-        self.results.set_filter(filter, ctx)
+        self.tabs.active_mut().results.set_filter(filter, ctx)
     }
 
     pub fn save(&self, path: &Path, ctx: &Context) -> Option<Flash> {
-        self.results.save(path, ctx)
+        self.tabs.active().results.save(path, ctx)
     }
 
-    /// Run progress, shown on the palette line.
+    /// The active tab's run progress, shown on the palette line.
     pub fn status(&self) -> Option<Line<'_>> {
-        let (sink, elapsed) = self.run.as_ref()?.progress();
-        Some(Line::from(vec![
-            Span::styled("running ", theme::PENDING),
-            Span::raw(format!(
-                "{} rows · {} · {}",
-                format::count(sink.rows_written),
-                format::bytes(sink.bytes_written),
-                format::duration(elapsed),
-            )),
-            Span::styled("  esc cancel", theme::DIM),
-        ]))
+        self.tabs.active().status()
     }
 
-    fn start_run(&mut self, ctx: &Context) -> KeyOutcome {
-        let report = |message: String| KeyOutcome::Action(Action::Report(message));
-        if self.run.is_some() {
-            return report("a query is already running; esc cancels it".into());
+    /// Query and help keys: `[` and `]` step through tabs, `n` adds a
+    /// query, `d` deletes the active one and `?` opens help.
+    fn query_key(&mut self, key: KeyEvent) -> Option<KeyOutcome> {
+        match key.code {
+            KeyCode::Char('[') => self.tabs.prev(),
+            KeyCode::Char(']') => self.tabs.next(),
+            KeyCode::Char('n') => self.prompt = Some(Prompt::New(TextInput::default())),
+            KeyCode::Char('d') if self.tabs.len() == 1 => {
+                let message = "the last open query is deleted from the query list".into();
+                return Some(KeyOutcome::Action(Action::Report(message)));
+            }
+            KeyCode::Char('d') => self.prompt = Some(Prompt::Delete(self.query().clone())),
+            KeyCode::Char('?') => self.prompt = Some(Prompt::Help),
+            _ => return None,
         }
-        let connections = ctx.connections();
-        let Some(pool) = connections.pool(&self.connection) else {
-            return report(match connections.state(&self.connection) {
-                Some(ConnectionState::Failed(error)) => format!("{}: {error}", self.connection),
-                _ => format!("{} is still connecting", self.connection),
-            });
+        Some(KeyOutcome::Consumed)
+    }
+
+    fn handle_prompt(&mut self, key: KeyEvent) -> anyhow::Result<()> {
+        let Some(prompt) = &mut self.prompt else {
+            return Ok(());
         };
-        let sql = self.editor.sql_to_run();
-        if sql.trim().is_empty() {
-            return report("nothing to run".into());
+        let submitted = match prompt {
+            Prompt::New(input) => match input.handle_key(key) {
+                InputEvent::Submit => true,
+                InputEvent::Cancel => false,
+                InputEvent::Edited | InputEvent::Ignored => return Ok(()),
+            },
+            Prompt::Delete(_) => match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => true,
+                KeyCode::Char('n') | KeyCode::Esc => false,
+                _ => return Ok(()),
+            },
+            Prompt::Help => match key.code {
+                KeyCode::Char('?') | KeyCode::Esc => false,
+                _ => return Ok(()),
+            },
+        };
+        if submitted {
+            // Keep the prompt open on invalid input so it can be corrected.
+            match prompt {
+                Prompt::New(input) => {
+                    let name = QueryName::parse(input.text())?;
+                    self.store.create(&name)?;
+                    self.tabs.add(name, &self.store)?;
+                    self.focus = Panel::Editor;
+                }
+                Prompt::Delete(name) => {
+                    self.store.delete(name)?;
+                    self.tabs.remove(name);
+                }
+                Prompt::Help => {}
+            }
         }
-        let run = Run::start(
-            pool,
-            sql,
-            &ctx.shared.results_dir,
-            ctx.options().byte_limit,
-            ctx.shared.messages.clone(),
-        );
-        self.stats.started(run.id());
-        self.run = Some(run);
-        self.results.running();
-        KeyOutcome::Consumed
+        self.prompt = None;
+        Ok(())
     }
 
     fn shows(&self, panel: Panel) -> bool {
@@ -295,13 +290,6 @@ impl Workspace {
         self.focus = visible[next % len];
     }
 
-    /// Focus the visible panel next to the focused one, if any.
-    pub fn move_focus(&mut self, direction: Direction) {
-        if let Some(panel) = self.focus.neighbour(direction).filter(|p| self.shows(*p)) {
-            self.focus = panel;
-        }
-    }
-
     pub fn toggle(&mut self, sidebar: Sidebar) {
         self.visibility.toggle(sidebar, self.width);
         if !self.shows(self.focus) {
@@ -309,41 +297,68 @@ impl Workspace {
         }
     }
 
+    fn tab_at(&self, position: Position) -> Option<usize> {
+        let editor = self.layout.as_ref()?.get(Panel::Editor)?;
+        let x = position.x.checked_sub(editor.x + 1)?;
+        (position.y == editor.y)
+            .then(|| self.tab_hits.iter().find(|(span, _)| span.contains(&x)))
+            .flatten()
+            .map(|(_, index)| *index)
+    }
+
+    /// The editor, with the tab titles in its top border.
+    fn render_editor(&mut self, frame: &mut Frame, area: Rect, ctx: &Context) {
+        let editor = &self.tabs.active().editor;
+        let marker = if editor.captures_input() {
+            editor::INSERT_MARKER_WIDTH
+        } else {
+            0
+        };
+        let (title, hits) = self.tabs.title(area.width.saturating_sub(2 + marker));
+        self.tab_hits = hits;
+        self.tabs
+            .active_mut()
+            .editor
+            .render_titled(frame, area, ctx, title);
+    }
+
     fn panel(&self, panel: Panel) -> &dyn Component {
         match panel {
             Panel::Catalog => &self.catalog,
-            Panel::Editor => &self.editor,
-            Panel::Results => &self.results,
-            Panel::Stats => &self.stats,
+            Panel::Editor => &self.tabs.active().editor,
+            Panel::Results => &self.tabs.active().results,
+            Panel::Stats => &self.tabs.active().stats,
         }
     }
 
     fn panel_mut(&mut self, panel: Panel) -> &mut dyn Component {
         match panel {
             Panel::Catalog => &mut self.catalog,
-            Panel::Editor => &mut self.editor,
-            Panel::Results => &mut self.results,
-            Panel::Stats => &mut self.stats,
+            Panel::Editor => &mut self.tabs.active_mut().editor,
+            Panel::Results => &mut self.tabs.active_mut().results,
+            Panel::Stats => &mut self.tabs.active_mut().stats,
         }
     }
 }
 
 impl Component for Workspace {
-    /// Run keys work from every panel, insert mode included. Esc cancels a
-    /// running query and `i` starts editing, once the focused panel has
-    /// released input.
+    /// Run keys work from every panel, insert mode included. Once the
+    /// focused panel has released input, Esc cancels a running query, `e`
+    /// starts editing, and query and help keys apply.
     fn handle_key(&mut self, key: KeyEvent, ctx: &Context) -> KeyOutcome {
+        if self.prompt.is_some() {
+            return match self.handle_prompt(key) {
+                Ok(()) => KeyOutcome::Consumed,
+                Err(e) => KeyOutcome::Action(Action::Report(format!("{e:#}"))),
+            };
+        }
         let run = key.code == KeyCode::F(5)
             || (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::CONTROL));
         if run {
-            return self.start_run(ctx);
+            return self.tabs.active_mut().start_run(&self.connection, ctx);
         }
         let capturing = self.panel(self.focus).captures_input();
-        if key.code == KeyCode::Esc
-            && !capturing
-            && let Some(run) = &self.run
-        {
-            run.cancel();
+        if key.code == KeyCode::Esc && !capturing && self.tabs.active().cancel() {
             return KeyOutcome::Consumed;
         }
         if key.modifiers.contains(KeyModifiers::ALT) && !capturing {
@@ -359,26 +374,42 @@ impl Component for Workspace {
                 return KeyOutcome::Consumed;
             }
         }
-        if key.code == KeyCode::Char('i') && key.modifiers.is_empty() && !capturing {
-            self.focus = Panel::Editor;
-            self.editor.insert();
-            return KeyOutcome::Consumed;
+        if !capturing && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+            if key.code == KeyCode::Char('e') {
+                self.focus = Panel::Editor;
+                self.tabs.active_mut().editor.insert();
+                return KeyOutcome::Consumed;
+            }
+            if let Some(outcome) = self.query_key(key) {
+                return outcome;
+            }
         }
         let outcome = self.panel_mut(self.focus).handle_key(key, ctx);
         if let Some(sql) = self.catalog.take_insert() {
-            self.editor.insert_text(&sql);
+            self.tabs.active_mut().editor.insert_text(&sql);
             self.focus = Panel::Editor;
         }
         outcome
     }
 
-    /// Dragging a border between panels resizes them. Otherwise a left
-    /// click focuses the panel under it, and the event goes to that panel.
+    /// A left click on a tab title selects it. Dragging a border between
+    /// panels resizes them. Otherwise a left click focuses the panel under
+    /// it, and the event goes to that panel.
     fn handle_mouse(&mut self, event: MouseEvent, ctx: &Context) -> KeyOutcome {
-        if self.results.handle_overlay_mouse(event) {
+        if self.prompt.is_some() {
+            return KeyOutcome::Consumed;
+        }
+        if self.tabs.active_mut().results.handle_overlay_mouse(event) {
             return KeyOutcome::Consumed;
         }
         let position = Position::new(event.column, event.row);
+        if event.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some(index) = self.tab_at(position)
+        {
+            self.tabs.select_index(index);
+            self.focus = Panel::Editor;
+            return KeyOutcome::Consumed;
+        }
         match (event.kind, self.dragging) {
             (MouseEventKind::Drag(MouseButton::Left), Some(border)) => {
                 if let Some(layout) = &self.layout {
@@ -416,21 +447,36 @@ impl Component for Workspace {
         let layout = self.layout.insert(layout);
         let areas = Panel::ORDER.map(|panel| layout.get(panel));
         for (panel, area) in Panel::ORDER.into_iter().zip(areas) {
-            if let Some(area) = area {
-                let focused = ctx.focused && panel == self.focus;
-                self.panel_mut(panel)
-                    .render(frame, area, &ctx.with_focus(focused));
+            let Some(area) = area else { continue };
+            let ctx = ctx.with_focus(ctx.focused && panel == self.focus);
+            if panel == Panel::Editor {
+                self.render_editor(frame, area, &ctx);
+            } else {
+                self.panel_mut(panel).render(frame, area, &ctx);
             }
         }
-        self.results.render_overlay(frame, area);
+        self.tabs.active().results.render_overlay(frame, area);
+        match &self.prompt {
+            Some(Prompt::New(input)) => prompt::render_input(frame, area, "new query", input),
+            Some(Prompt::Delete(name)) => {
+                prompt::render_confirm(frame, area, "delete", &format!("Delete {name}.sql?"));
+            }
+            Some(Prompt::Help) => prompt::render_keys(frame, area, "help", HELP),
+            None => {}
+        }
     }
 
     fn hints(&self) -> &'static [KeyHint] {
+        match self.prompt {
+            Some(Prompt::Help) => return HELP_HINTS,
+            Some(_) => return PROMPT_HINTS,
+            None => {}
+        }
         self.panel(self.focus).hints()
     }
 
     fn captures_input(&self) -> bool {
-        self.panel(self.focus).captures_input()
+        self.prompt.is_some() || self.panel(self.focus).captures_input()
     }
 
     fn copy_text(&mut self) -> Option<String> {
@@ -446,11 +492,126 @@ mod tests {
     fn workspace(width: u16) -> Workspace {
         let connections = connections(&["a"]);
         let store = QueryStore::new(std::env::temp_dir().join("quill-test-none"));
-        let editor = Editor::new(String::new()).unwrap();
-        let query = QueryName::parse("q").unwrap();
-        let mut workspace = Workspace::new(id(&connections, "a"), query, store, editor);
+        let names = ["a", "b", "c", "d"].map(|n| QueryName::parse(n).unwrap());
+        let mut tabs = Tabs::new(QueryTab::open(names[0].clone(), &store).unwrap());
+        tabs.sync(&names, &names[0], &store).unwrap();
+        let mut workspace = Workspace::new(id(&connections, "a"), store, tabs);
         workspace.width = width;
         workspace
+    }
+
+    fn press(workspace: &mut Workspace, code: KeyCode, ctx: &Context) -> KeyOutcome {
+        workspace.handle_key(KeyEvent::new(code, KeyModifiers::NONE), ctx)
+    }
+
+    #[test]
+    fn brackets_switch_queries_from_any_panel_but_not_while_editing() {
+        let (shared, _rx) = crate::component::testing::shared(connections(&[]));
+        let ctx = shared.context(true);
+        for panel in Panel::ORDER {
+            let mut workspace = workspace(u16::MAX);
+            workspace.focus = panel;
+            press(&mut workspace, KeyCode::Char('['), &ctx);
+            assert_eq!(workspace.query().as_str(), "d");
+            press(&mut workspace, KeyCode::Char(']'), &ctx);
+            assert_eq!(workspace.query().as_str(), "a");
+        }
+        let mut workspace = workspace(u16::MAX);
+        press(&mut workspace, KeyCode::Char('e'), &ctx);
+        press(&mut workspace, KeyCode::Char(']'), &ctx);
+        assert_eq!(workspace.query().as_str(), "a");
+        assert!(workspace.tabs.active_mut().editor.unsaved().is_some());
+    }
+
+    #[test]
+    fn question_mark_toggles_help() {
+        let (shared, _rx) = crate::component::testing::shared(connections(&[]));
+        let ctx = shared.context(true);
+        let mut workspace = workspace(u16::MAX);
+        press(&mut workspace, KeyCode::Char('?'), &ctx);
+        assert!(matches!(workspace.prompt, Some(Prompt::Help)));
+        // Help takes keys until it closes.
+        press(&mut workspace, KeyCode::Char(']'), &ctx);
+        assert_eq!(workspace.query().as_str(), "a");
+        press(&mut workspace, KeyCode::Char('?'), &ctx);
+        assert!(workspace.prompt.is_none());
+        press(&mut workspace, KeyCode::Char('?'), &ctx);
+        press(&mut workspace, KeyCode::Esc, &ctx);
+        assert!(workspace.prompt.is_none());
+    }
+
+    #[test]
+    fn n_and_d_add_and_delete_queries() {
+        let dir = tempfile::tempdir().unwrap();
+        let connections = connections(&["a"]);
+        let store = QueryStore::new(dir.path());
+        let only = QueryName::parse("only").unwrap();
+        store.create(&only).unwrap();
+        let tabs = Tabs::new(QueryTab::open(only, &store).unwrap());
+        let mut workspace = Workspace::new(id(&connections, "a"), store, tabs);
+        let (shared, _rx) = crate::component::testing::shared(connections);
+        let ctx = shared.context(true);
+
+        // The only query cannot be deleted here.
+        press(&mut workspace, KeyCode::Char('d'), &ctx);
+        assert!(workspace.prompt.is_none());
+
+        press(&mut workspace, KeyCode::Char('n'), &ctx);
+        assert!(workspace.captures_input());
+        for c in "fresh".chars() {
+            press(&mut workspace, KeyCode::Char(c), &ctx);
+        }
+        press(&mut workspace, KeyCode::Enter, &ctx);
+        assert_eq!(workspace.query().as_str(), "fresh");
+        assert!(dir.path().join("fresh.sql").is_file());
+
+        press(&mut workspace, KeyCode::Char('d'), &ctx);
+        press(&mut workspace, KeyCode::Char('n'), &ctx);
+        assert!(dir.path().join("fresh.sql").is_file());
+        press(&mut workspace, KeyCode::Char('d'), &ctx);
+        press(&mut workspace, KeyCode::Char('y'), &ctx);
+        assert!(!dir.path().join("fresh.sql").exists());
+        assert_eq!(workspace.query().as_str(), "only");
+        assert!(!workspace.captures_input());
+    }
+
+    #[test]
+    fn clicking_a_tab_selects_it() {
+        let (shared, _rx) = crate::component::testing::shared(connections(&[]));
+        let ctx = shared.context(true);
+        let mut workspace = workspace(u16::MAX);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 40)).unwrap();
+        terminal
+            .draw(|frame| workspace.render(frame, frame.area(), &ctx))
+            .unwrap();
+        let editor = workspace
+            .layout
+            .as_ref()
+            .unwrap()
+            .get(Panel::Editor)
+            .unwrap();
+        let top: String = (editor.x..editor.right())
+            .map(|x| {
+                terminal.backend().buffer()[(x, editor.y)]
+                    .symbol()
+                    .to_owned()
+            })
+            .collect();
+        assert!(top.contains(" a │ b │ c │ d "), "{top}");
+
+        workspace.focus = Panel::Results;
+        let c = top.chars().position(|c| c == 'c').unwrap();
+        let column = editor.x + u16::try_from(c).unwrap();
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row: editor.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        workspace.handle_mouse(click, &ctx);
+        assert_eq!(workspace.query().as_str(), "c");
+        assert_eq!(workspace.focus, Panel::Editor);
     }
     #[test]
     fn focus_cycles_through_visible_panels() {
@@ -469,31 +630,6 @@ mod tests {
         narrow.cycle_focus(false);
         assert_eq!(narrow.focus, Panel::Results);
         narrow.cycle_focus(false);
-        assert_eq!(narrow.focus, Panel::Editor);
-    }
-
-    #[test]
-    fn ctrl_hjkl_moves_to_visible_neighbours() {
-        let mut wide = workspace(u16::MAX);
-        wide.move_focus(Direction::Down);
-        assert_eq!(wide.focus, Panel::Results);
-        wide.move_focus(Direction::Down);
-        assert_eq!(wide.focus, Panel::Results);
-        wide.move_focus(Direction::Right);
-        assert_eq!(wide.focus, Panel::Stats);
-        wide.move_focus(Direction::Left);
-        assert_eq!(wide.focus, Panel::Editor);
-        wide.move_focus(Direction::Left);
-        assert_eq!(wide.focus, Panel::Catalog);
-
-        wide.move_focus(Direction::Down);
-        assert_eq!(wide.focus, Panel::Results);
-        wide.move_focus(Direction::Right);
-        wide.move_focus(Direction::Up);
-        assert_eq!(wide.focus, Panel::Editor);
-
-        let mut narrow = workspace(layout::HIDE_CATALOG_BELOW - 1);
-        narrow.move_focus(Direction::Left);
         assert_eq!(narrow.focus, Panel::Editor);
     }
 
@@ -533,21 +669,21 @@ mod tests {
     }
 
     #[test]
-    fn i_edits_from_any_panel() {
+    fn e_edits_from_any_panel() {
         let (shared, _rx) = crate::component::testing::shared(connections(&[]));
         let ctx = shared.context(true);
-        let i = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE);
+        let e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
         for panel in Panel::ORDER {
             let mut workspace = workspace(u16::MAX);
             workspace.focus = panel;
             assert!(matches!(
-                workspace.handle_key(i, &ctx),
+                workspace.handle_key(e, &ctx),
                 KeyOutcome::Consumed
             ));
             assert_eq!(workspace.focus, Panel::Editor);
             assert!(workspace.captures_input(), "{panel:?}");
-            // Already editing: `i` is text, not a command.
-            workspace.handle_key(i, &ctx);
+            // Already editing: `e` is text, not a command.
+            workspace.handle_key(e, &ctx);
             assert!(workspace.captures_input());
         }
     }

@@ -18,7 +18,7 @@ use crate::{
     widget::{panel, theme},
 };
 
-const HINTS: &[KeyHint] = &[KeyHint::new("hjkl", "scroll")];
+const HINTS: &[KeyHint] = &[];
 
 enum Pending<T> {
     Waiting,
@@ -57,6 +57,11 @@ impl Stats {
             profile: Pending::Waiting,
         });
         self.scroll = (0, 0);
+    }
+
+    /// The run these statistics describe.
+    pub fn run(&self) -> Option<RunId> {
+        self.run.as_ref().map(|r| r.run)
     }
 
     fn current(&mut self, run: RunId) -> Option<&mut RunStats> {

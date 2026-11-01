@@ -122,7 +122,7 @@ impl Drop for Run {
 }
 
 /// A run's result directory, removed when the result is replaced or the
-/// workspace closes. The session directory is the backstop.
+/// connection's session ends. The session directory is the backstop.
 pub struct ResultDir(PathBuf);
 
 impl ResultDir {

@@ -1,5 +1,6 @@
 //! Configured connections, grouped by source file, and their live pool state.
 use std::{
+    borrow::Cow,
     fmt,
     path::{Path, PathBuf},
     sync::Arc,
@@ -35,8 +36,21 @@ use crate::filter::Filter;
 /// }
 /// ```
 pub trait ConnectionSource: Send + Sync {
-    /// Driver name shown beside the connection, e.g. `postgres`.
+    /// Username shown in details, e.g. `user`.
+    fn user(&self) -> Option<&str>;
+
+    /// Driver name shown details, e.g. `postgres`.
     fn kind(&self) -> &'static str;
+
+    /// Where the data lives, shown in details, e.g. `db.internal:5432`.
+    fn host(&self) -> Option<Cow<'_, str>> {
+        None
+    }
+
+    /// The database or its equivalent, shown in details, e.g. `analytics`.
+    fn database(&self) -> Option<&str> {
+        None
+    }
 
     fn connect(&self) -> PoolFuture<'_, Arc<dyn ConnectionPool>>;
 
@@ -203,6 +217,27 @@ impl Connections {
         self.entries.get(id).map_or("", |e| e.source.kind())
     }
 
+    pub(crate) fn user<'a>(&'a self, id: &ConnectionId) -> &'a str {
+        self.entries
+            .get(id)
+            .and_then(|e| e.source.user())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn host(&self, id: &ConnectionId) -> Cow<'_, str> {
+        self.entries
+            .get(id)
+            .and_then(|e| e.source.host())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn database<'a>(&'a self, id: &ConnectionId) -> &'a str {
+        self.entries
+            .get(id)
+            .and_then(|e| e.source.database())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn query_dir(&self, id: &ConnectionId) -> PathBuf {
         self.entries
             .get(id)
@@ -302,6 +337,10 @@ pub(crate) mod testing {
     pub(crate) struct Offline(pub PathBuf);
 
     impl ConnectionSource for Offline {
+        fn user(&self) -> Option<&'static str> {
+            Some("user")
+        }
+
         fn kind(&self) -> &'static str {
             "offline"
         }
