@@ -410,3 +410,67 @@ mod table {
         Ok(())
     }
 }
+
+#[tokio::test]
+#[ignore = "requires Docker Compose Scylla"]
+async fn scylla_nested_results_survive_feather_storage() -> TestResult {
+    use arrow::array::{Array, Int32Array, ListArray, MapArray, StringArray, StructArray};
+    use quill_drivers::scylla::{ScyllaConnectionPool, ScyllaSettings};
+
+    let tls = std::env::var_os("QUILL_TEST_TLS").map(|_| quill_drivers::settings::TlsSettings {
+        ca_cert: Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docker/tls/certs/ca.pem"),
+        ),
+        identity: None,
+    });
+    let pool = ScyllaConnectionPool::connect(&ScyllaSettings {
+        nodes: vec!["localhost:9042".into()],
+        keyspace: None,
+        user: None,
+        password: None,
+        datacenter: None,
+        tls,
+        params: Default::default(),
+    })
+    .await?;
+    pool.inner().query_unpaged("CREATE KEYSPACE quill_nested_test WITH replication = {'class':'NetworkTopologyStrategy','replication_factor':1}", ()).await?;
+    let result: TestResult = async {
+        pool.inner().query_unpaged("CREATE TYPE quill_nested_test.profile (age int, note text)", ()).await?;
+        pool.inner().query_unpaged("CREATE TABLE quill_nested_test.items (id int PRIMARY KEY, xs list<frozen<map<text,int>>>, tags set<text>, pair tuple<int,text>, person frozen<profile>)", ()).await?;
+        let insert = pool.inner().prepare("INSERT INTO quill_nested_test.items (id,xs,tags,pair,person) VALUES (?,[{'a':42}],{'x'},(7,null),{age:21,note:null})").await?;
+        for id in 0..1200i32 { pool.inner().execute_unpaged(&insert,(id,)).await?; }
+        let execution = pool.execute(QueryRequest::new("SELECT xs,tags,pair,person FROM quill_nested_test.items")).await?;
+        let dir = tempfile::tempdir()?;
+        let stored = FeatherStore::new(dir.path(), None).drain(execution, &SinkProgress::default()).await?;
+        let stored = only(stored)?;
+        assert_eq!(stored.rows(),1200);
+        assert_eq!(stored.schema().field(1).metadata()["quill.logical_type"],"set");
+        assert_eq!(stored.schema().field(3).metadata()["quill.logical_type"],"udt");
+        let mut count = 0;
+        let mut batches = 0;
+        for batch in stored.read(0..1200) {
+            let batch = batch?;
+            assert_eq!(batch.schema(), *stored.schema());
+            let lists = batch.column(0).as_any().downcast_ref::<ListArray>().ok_or("list")?;
+            let tuples = batch.column(2).as_any().downcast_ref::<StructArray>().ok_or("tuple")?;
+            let people = batch.column(3).as_any().downcast_ref::<StructArray>().ok_or("UDT")?;
+            for row in 0..batch.num_rows() {
+                let child = lists.value(row);
+                let maps = child.as_any().downcast_ref::<MapArray>().ok_or("map")?;
+                assert_eq!(maps.keys().as_any().downcast_ref::<StringArray>().ok_or("keys")?.value(0),"a");
+                assert_eq!(maps.values().as_any().downcast_ref::<Int32Array>().ok_or("values")?.value(0),42);
+                assert_eq!(tuples.column(0).as_any().downcast_ref::<Int32Array>().ok_or("tuple int")?.value(row),7);
+                assert!(tuples.column(1).is_null(row));
+                assert_eq!(people.column(0).as_any().downcast_ref::<Int32Array>().ok_or("age")?.value(row),21);
+                assert!(people.column(1).is_null(row));
+            }
+            count += batch.num_rows(); batches += 1;
+        }
+        assert_eq!(count,1200); assert!(batches > 1);
+        Ok(())
+    }.await;
+    pool.inner()
+        .query_unpaged("DROP KEYSPACE quill_nested_test", ())
+        .await?;
+    result
+}

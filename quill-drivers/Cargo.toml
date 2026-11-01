@@ -35,6 +35,7 @@ tokio-native-tls = "0.3"
 url = { workspace = true }
 
 [dev-dependencies]
+arrow = { workspace = true, features = ["ipc"] }
 tempfile.workspace = true
 toml.workspace = true
 

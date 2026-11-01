@@ -46,9 +46,14 @@ propagated rather than coercing a value into a different storage class.
 - Scylla supports every current native scalar type. Decimal and varint use exact
   annotated text, inet/UUID/timeuuid use annotated canonical text, duration uses
   Arrow MonthDayNano, and date/time/timestamp preserve native epoch units.
-  Collections, vectors, tuples and user-defined types return an unsupported-type
-  error containing their type description. Legacy empty scalar values return a
-  decoding error; they are never silently emitted as null.
+  Lists and sets map recursively to Arrow List, maps to Map, tuples and
+  user-defined types to Struct, and vectors to FixedSizeList. Set and UDT
+  metadata preserves semantics and UDT identity. Tuple fields are named
+  `item_0`, `item_1`, etc.; UDT fields retain their declared names. Collection
+  items and map keys/values are non-nullable; tuple and UDT fields retain nulls.
+  Null containers remain distinct from empty containers, and vector dimensions
+  are checked against the declared type. Legacy empty scalar values and
+  mismatched nested values return decoding errors rather than becoming null.
 - SQLite supports its five native storage classes plus declared logical types.
   Mixed runtime storage classes that cannot fit the fixed declared schema fail
   decoding. Expressions with unavailable type metadata can only emit nulls;
