@@ -25,3 +25,36 @@ async fn sqlite_execution() -> TestResult {
     assert_eq!(measured.server, None);
     failures(&pool, "SELECT missing_execution_column", "SELECT 42").await
 }
+
+#[tokio::test]
+async fn mixed_storage_classes_fail_without_coercion() -> TestResult {
+    use futures::TryStreamExt;
+    let pool = SqliteConnectionPool::connect(&SqliteSettings {
+        path: ":memory:".into(),
+        params: Default::default(),
+    })
+    .await?;
+    sqlx::query("CREATE TABLE mixed(value INTEGER)")
+        .execute(pool.inner())
+        .await?;
+    sqlx::query("INSERT INTO mixed VALUES(42),('not an integer')")
+        .execute(pool.inner())
+        .await?;
+    let mut execution = pool
+        .execute(QueryRequest::new("SELECT value FROM mixed"))
+        .await?;
+    let mut failed = false;
+    loop {
+        match execution.events.try_next().await {
+            Ok(Some(QueryEvent::Batch { .. })) => panic!("mixed values must not be coerced"),
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(_) => {
+                failed = true;
+                break;
+            }
+        }
+    }
+    assert!(failed);
+    Ok(())
+}

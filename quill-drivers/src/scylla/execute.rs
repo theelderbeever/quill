@@ -112,7 +112,7 @@ impl ScyllaConnectionPool {
                 .column_specs()
                 .iter()
                 .zip(&kinds)
-                .map(|(s, k)| Field::new(s.name(), k.data_type(), true))
+                .map(|(s, k)| k.field(s.name()))
                 .collect::<Vec<_>>(),
         ));
         if !kinds.is_empty() {
@@ -165,7 +165,7 @@ impl ScyllaConnectionPool {
             .iter()
             .enumerate()
             .map(|(i, k)| k.array(rows, i))
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let batch = RecordBatch::try_new(schema.clone(), arrays)
             .map_err(|e| Error::QueryExecution(Box::new(e)))?;
         control
@@ -179,7 +179,9 @@ impl ScyllaConnectionPool {
             .await
     }
 }
+#[derive(Debug)]
 enum Kind {
+    Native(NativeType),
     Text,
     Blob,
     Boolean,
@@ -202,11 +204,28 @@ impl Kind {
             ColumnType::Native(NativeType::Double) => Self::Double,
             ColumnType::Native(NativeType::Text | NativeType::Ascii) => Self::Text,
             ColumnType::Native(NativeType::Blob) => Self::Blob,
-            _ => return Err(Error::UnsupportedOperation("Scylla result type")),
+            ColumnType::Native(native) => Self::Native(native.clone()),
+            _ => {
+                return Err(Error::QueryExecution(Box::new(
+                    ConversionError::Unsupported(format!("{t:?}")),
+                )));
+            }
         })
     }
     fn data_type(&self) -> DataType {
         match self {
+            Self::Native(native) => match native {
+                NativeType::Counter => DataType::Int64,
+                NativeType::Date => DataType::Date32,
+                NativeType::Time => DataType::Time64(arrow::datatypes::TimeUnit::Nanosecond),
+                NativeType::Timestamp => {
+                    DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, Some("UTC".into()))
+                }
+                NativeType::Duration => {
+                    DataType::Interval(arrow::datatypes::IntervalUnit::MonthDayNano)
+                }
+                _ => DataType::Utf8,
+            },
             Self::Text => DataType::Utf8,
             Self::Blob => DataType::Binary,
             Self::Boolean => DataType::Boolean,
@@ -218,8 +237,137 @@ impl Kind {
             Self::Double => DataType::Float64,
         }
     }
-    fn array(&self, rows: &[Row], index: usize) -> ArrayRef {
-        match self {
+    fn field(&self, name: &str) -> Field {
+        let field = Field::new(name, self.data_type(), true);
+        if let Self::Native(native) = self
+            && self.data_type() == DataType::Utf8
+        {
+            let logical = format!("{native:?}").to_lowercase();
+            return field.with_metadata(
+                [
+                    ("quill.native_type".into(), logical.clone()),
+                    ("quill.logical_type".into(), logical),
+                    ("quill.encoding".into(), "text".into()),
+                ]
+                .into(),
+            );
+        }
+        field
+    }
+    fn array(&self, rows: &[Row], index: usize) -> Result<ArrayRef> {
+        for row in rows {
+            if let Some(value) = &row.columns[index] {
+                let valid = match (self, value) {
+                    (Self::Text, CqlValue::Text(_) | CqlValue::Ascii(_))
+                    | (Self::Blob, CqlValue::Blob(_))
+                    | (Self::Boolean, CqlValue::Boolean(_))
+                    | (Self::Int, CqlValue::Int(_))
+                    | (Self::BigInt, CqlValue::BigInt(_))
+                    | (Self::SmallInt, CqlValue::SmallInt(_))
+                    | (Self::TinyInt, CqlValue::TinyInt(_))
+                    | (Self::Float, CqlValue::Float(_))
+                    | (Self::Double, CqlValue::Double(_)) => true,
+                    (Self::Native(native), value) => matches!(
+                        (native, value),
+                        (NativeType::Counter, CqlValue::Counter(_))
+                            | (NativeType::Date, CqlValue::Date(_))
+                            | (NativeType::Time, CqlValue::Time(_))
+                            | (NativeType::Timestamp, CqlValue::Timestamp(_))
+                            | (NativeType::Duration, CqlValue::Duration(_))
+                            | (NativeType::Inet, CqlValue::Inet(_))
+                            | (NativeType::Uuid, CqlValue::Uuid(_))
+                            | (NativeType::Timeuuid, CqlValue::Timeuuid(_))
+                            | (NativeType::Decimal, CqlValue::Decimal(_))
+                            | (NativeType::Varint, CqlValue::Varint(_))
+                    ),
+                    _ => false,
+                };
+                if !valid {
+                    return Err(Error::QueryExecution(Box::new(ConversionError::Mismatch {
+                        column: index,
+                        expected: format!("{self:?}"),
+                    })));
+                }
+            }
+        }
+        Ok(match self {
+            Self::Native(native) => {
+                macro_rules! primitive {
+                    ($variant:ident, $array:ty, $convert:expr) => {
+                        Arc::new(
+                            rows.iter()
+                                .map(|row| match &row.columns[index] {
+                                    Some(CqlValue::$variant(value)) => Some(($convert)(value)),
+                                    _ => None,
+                                })
+                                .collect::<$array>(),
+                        ) as ArrayRef
+                    };
+                }
+                match native {
+                    NativeType::Counter => {
+                        primitive!(Counter, Int64Array, |v: &scylla::value::Counter| v.0)
+                    }
+                    NativeType::Date => primitive!(
+                        Date,
+                        Date32Array,
+                        |v: &scylla::value::CqlDate| (i64::from(v.0) - (1i64 << 31)) as i32
+                    ),
+                    NativeType::Time => {
+                        primitive!(Time, Time64NanosecondArray, |v: &scylla::value::CqlTime| v
+                            .0)
+                    }
+                    NativeType::Timestamp => Arc::new(
+                        rows.iter()
+                            .map(|row| match &row.columns[index] {
+                                Some(CqlValue::Timestamp(value)) => Some(value.0),
+                                _ => None,
+                            })
+                            .collect::<TimestampMillisecondArray>()
+                            .with_timezone("UTC"),
+                    ),
+                    NativeType::Duration => primitive!(
+                        Duration,
+                        IntervalMonthDayNanoArray,
+                        |v: &scylla::value::CqlDuration| {
+                            arrow::datatypes::IntervalMonthDayNano::new(
+                                v.months,
+                                v.days,
+                                v.nanoseconds,
+                            )
+                        }
+                    ),
+                    _ => {
+                        let values = rows
+                            .iter()
+                            .map(|row| {
+                                row.columns[index].as_ref().map(|value| match value {
+                                    CqlValue::Inet(v) => v.to_string(),
+                                    CqlValue::Uuid(v) => v.to_string(),
+                                    CqlValue::Timeuuid(v) => v.to_string(),
+                                    CqlValue::Varint(v) => {
+                                        num_bigint::BigInt::from_signed_bytes_be(
+                                            v.as_signed_bytes_be_slice(),
+                                        )
+                                        .to_string()
+                                    }
+                                    CqlValue::Decimal(v) => {
+                                        let (bytes, scale) =
+                                            v.as_signed_be_bytes_slice_and_exponent();
+                                        sqlx::types::BigDecimal::new(
+                                            num_bigint::BigInt::from_signed_bytes_be(bytes),
+                                            i64::from(scale),
+                                        )
+                                        .to_string()
+                                    }
+                                    _ => unreachable!("validated native value"),
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        Arc::new(StringArray::from(values))
+                    }
+                }
+            }
             Self::Text => Arc::new(
                 rows.iter()
                     .map(|r| match &r.columns[index] {
@@ -292,7 +440,7 @@ impl Kind {
                     })
                     .collect::<Float64Array>(),
             ),
-        }
+        })
     }
 }
 
@@ -373,5 +521,90 @@ impl scylla::serialize::row::SerializeRow for Parameters {
     }
     fn is_empty(&self) -> bool {
         self.named.is_empty() && self.positional.is_empty()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ConversionError {
+    #[error("unsupported Scylla result type: {0}")]
+    Unsupported(String),
+    #[error("Scylla result column {column} does not match {expected}")]
+    Mismatch { column: usize, expected: String },
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod conversion_tests {
+    use super::*;
+
+    #[test]
+    fn native_scalars_preserve_values_and_nulls() -> Result<()> {
+        let rows = vec![
+            Row {
+                columns: vec![
+                    Some(CqlValue::Date(scylla::value::CqlDate(0))),
+                    Some(CqlValue::Counter(scylla::value::Counter(i64::MAX))),
+                ],
+            },
+            Row {
+                columns: vec![None, None],
+            },
+        ];
+        let dates = Kind::Native(NativeType::Date).array(&rows, 0)?;
+        assert_eq!(
+            dates
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .unwrap()
+                .value(0),
+            i32::MIN
+        );
+        assert!(dates.is_null(1));
+        let counters = Kind::Native(NativeType::Counter).array(&rows, 1)?;
+        assert_eq!(
+            counters
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            i64::MAX
+        );
+        assert!(counters.is_null(1));
+        Ok(())
+    }
+
+    #[test]
+    fn decimals_are_exact_annotated_text() -> Result<()> {
+        let kind = Kind::Native(NativeType::Decimal);
+        let rows = vec![Row {
+            columns: vec![Some(CqlValue::Decimal(
+                scylla::value::CqlDecimal::from_signed_be_bytes_and_exponent(vec![0x7b], 2),
+            ))],
+        }];
+        let array = kind.array(&rows, 0)?;
+        assert_eq!(
+            array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "1.23"
+        );
+        assert_eq!(
+            kind.field("amount").metadata()["quill.logical_type"],
+            "decimal"
+        );
+        assert_eq!(kind.field("amount").metadata()["quill.encoding"], "text");
+        Ok(())
+    }
+
+    #[test]
+    fn mismatches_and_empty_values_are_errors() {
+        for value in [CqlValue::Text("secret".into()), CqlValue::Empty] {
+            let rows = vec![Row {
+                columns: vec![Some(value)],
+            }];
+            assert!(Kind::Int.array(&rows, 0).is_err());
+        }
     }
 }

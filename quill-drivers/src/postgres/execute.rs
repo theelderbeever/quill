@@ -207,6 +207,11 @@ impl PostgresConnectionPool {
 
 #[derive(Clone, Copy)]
 enum ColumnKind {
+    Json(&'static str),
+    Oid,
+    InternalChar,
+    Interval,
+    Money,
     Bool,
     Int16,
     Int32,
@@ -227,6 +232,12 @@ enum ColumnKind {
 impl ColumnKind {
     fn parse(name: &str) -> ExecutionResult<Self> {
         Ok(match name {
+            "JSON" => Self::Json("json"),
+            "JSONB" => Self::Json("jsonb"),
+            "OID" => Self::Oid,
+            "\"CHAR\"" => Self::InternalChar,
+            "INTERVAL" => Self::Interval,
+            "MONEY" => Self::Money,
             "BOOL" => Self::Bool,
             "INT2" => Self::Int16,
             "INT4" => Self::Int32,
@@ -252,12 +263,33 @@ impl ColumnKind {
     }
     fn field(self, name: &str) -> Field {
         let field = Field::new(name, self.data_type(), true);
-        if matches!(self, Self::NumericText) {
+        if matches!(self, Self::NumericText | Self::Json(_) | Self::Money) {
+            let logical = match self {
+                Self::Json(_) => "json",
+                Self::Money => "money",
+                _ => "decimal",
+            };
             field.with_metadata(
                 [
-                    ("quill.native_type".into(), "numeric".into()),
-                    ("quill.logical_type".into(), "decimal".into()),
-                    ("quill.encoding".into(), "text".into()),
+                    (
+                        "quill.native_type".into(),
+                        match self {
+                            Self::Json(native) => native,
+                            Self::Money => "money",
+                            _ => "numeric",
+                        }
+                        .into(),
+                    ),
+                    ("quill.logical_type".into(), logical.into()),
+                    (
+                        "quill.encoding".into(),
+                        if matches!(self, Self::Money) {
+                            "minor_units"
+                        } else {
+                            "text"
+                        }
+                        .into(),
+                    ),
                 ]
                 .into(),
             )
@@ -268,9 +300,11 @@ impl ColumnKind {
 
     fn data_type(self) -> DataType {
         match self {
-            Self::Array(kind) => {
-                DataType::List(Arc::new(Field::new("item", kind.data_type(), true)))
-            }
+            Self::Json(_) | Self::Money => DataType::Utf8,
+            Self::Oid => DataType::UInt32,
+            Self::InternalChar => DataType::Int8,
+            Self::Interval => DataType::Interval(arrow::datatypes::IntervalUnit::MonthDayNano),
+            Self::Array(kind) => DataType::List(Arc::new(kind.item_field())),
             Self::Bool => DataType::Boolean,
             Self::Int16 => DataType::Int16,
             Self::Int32 => DataType::Int32,
@@ -291,6 +325,53 @@ impl ColumnKind {
     }
     fn array(self, rows: &[PgRow], index: usize) -> ExecutionResult<ArrayRef> {
         Ok(match self {
+            Self::Oid => Arc::new(
+                rows.iter()
+                    .map(|row| {
+                        row.try_get::<Option<sqlx::postgres::types::Oid>, _>(index)
+                            .map(|value| value.map(|value| value.0))
+                    })
+                    .collect::<std::result::Result<UInt32Array, _>>()?,
+            ),
+            Self::InternalChar => crate::macros::primitive!(rows, index, i8, Int8Array),
+            Self::Json(_) => {
+                let values = rows.iter().map(|row| row.try_get::<Option<sqlx::types::Json<Box<serde_json::value::RawValue>>>, _>(index).map(|value| value.map(|value| value.0.to_string()))).collect::<std::result::Result<Vec<_>, _>>()?;
+                Arc::new(StringArray::from(values))
+            }
+            Self::Money => {
+                let values = rows
+                    .iter()
+                    .map(|row| {
+                        row.try_get::<Option<sqlx::postgres::types::PgMoney>, _>(index)
+                            .map(|value| value.map(|value| value.0.to_string()))
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Arc::new(StringArray::from(values))
+            }
+            Self::Interval => {
+                let values = rows
+                    .iter()
+                    .map(|row| {
+                        let value =
+                            row.try_get::<Option<sqlx::postgres::types::PgInterval>, _>(index)?;
+                        value
+                            .map(|v| {
+                                v.microseconds
+                                    .checked_mul(1000)
+                                    .map(|nanos| {
+                                        arrow::datatypes::IntervalMonthDayNano::new(
+                                            v.months, v.days, nanos,
+                                        )
+                                    })
+                                    .ok_or(ExecutionError::UnsupportedType(
+                                        "interval nanoseconds exceed i64".into(),
+                                    ))
+                            })
+                            .transpose()
+                    })
+                    .collect::<ExecutionResult<IntervalMonthDayNanoArray>>()?;
+                Arc::new(values)
+            }
             Self::Array(kind) => kind.array(rows, index)?,
             Self::Bool => crate::macros::primitive!(rows, index, bool, BooleanArray),
             Self::Int16 => crate::macros::primitive!(rows, index, i16, Int16Array),
@@ -373,6 +454,13 @@ impl ColumnKind {
 /// One-dimensional arrays retain element types and element nullability in Arrow.
 #[derive(Clone, Copy)]
 enum ArrayKind {
+    Uuid,
+    Numeric,
+    Date,
+    Time,
+    Timestamp,
+    TimestampTz,
+    Binary,
     Bool,
     Int16,
     Int32,
@@ -383,8 +471,31 @@ enum ArrayKind {
 }
 
 impl ArrayKind {
+    fn item_field(self) -> Field {
+        let field = Field::new("item", self.data_type(), true);
+        if matches!(self, Self::Numeric) {
+            field.with_metadata(
+                [
+                    ("quill.native_type".into(), "numeric".into()),
+                    ("quill.logical_type".into(), "decimal".into()),
+                    ("quill.encoding".into(), "text".into()),
+                ]
+                .into(),
+            )
+        } else {
+            field
+        }
+    }
+
     fn parse(name: &str) -> ExecutionResult<Self> {
         Ok(match name {
+            "UUID" => Self::Uuid,
+            "NUMERIC" => Self::Numeric,
+            "DATE" => Self::Date,
+            "TIME" => Self::Time,
+            "TIMESTAMP" => Self::Timestamp,
+            "TIMESTAMPTZ" => Self::TimestampTz,
+            "BYTEA" => Self::Binary,
             "BOOL" => Self::Bool,
             "INT2" => Self::Int16,
             "INT4" => Self::Int32,
@@ -398,6 +509,14 @@ impl ArrayKind {
 
     fn data_type(self) -> DataType {
         match self {
+            Self::Uuid | Self::Numeric => DataType::Utf8,
+            Self::Date => DataType::Date32,
+            Self::Time => DataType::Time64(arrow::datatypes::TimeUnit::Nanosecond),
+            Self::Timestamp => DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
+            Self::TimestampTz => {
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, Some("UTC".into()))
+            }
+            Self::Binary => DataType::Binary,
             Self::Bool => DataType::Boolean,
             Self::Int16 => DataType::Int16,
             Self::Int32 => DataType::Int32,
@@ -426,7 +545,61 @@ impl ArrayKind {
                 Arc::new(builder.finish()) as ArrayRef
             }};
         }
+        macro_rules! converted_list {
+            ($native:ty, $builder:expr, $convert:expr) => {{
+                let mut builder = ListBuilder::new($builder).with_field(self.item_field());
+                for row in rows {
+                    if let Some(values) = row.try_get::<Option<Vec<Option<$native>>>, _>(index)? {
+                        for value in values {
+                            builder.values().append_option(value.map($convert));
+                        }
+                        builder.append(true);
+                    } else {
+                        builder.append(false);
+                    }
+                }
+                Arc::new(builder.finish()) as ArrayRef
+            }};
+        }
         Ok(match self {
+            Self::Uuid => converted_list!(
+                sqlx::types::Uuid,
+                StringBuilder::new(),
+                |v: sqlx::types::Uuid| v.to_string()
+            ),
+            Self::Numeric => converted_list!(
+                sqlx::types::BigDecimal,
+                StringBuilder::new(),
+                |v: sqlx::types::BigDecimal| v.to_string()
+            ),
+            Self::Date => converted_list!(
+                chrono::NaiveDate,
+                Date32Builder::new(),
+                |v: chrono::NaiveDate| (v - chrono::NaiveDate::default()).num_days() as i32
+            ),
+            Self::Time => converted_list!(
+                chrono::NaiveTime,
+                Time64NanosecondBuilder::new(),
+                |v: chrono::NaiveTime| {
+                    use chrono::Timelike;
+                    i64::from(v.num_seconds_from_midnight()) * 1_000_000_000
+                        + i64::from(v.nanosecond())
+                }
+            ),
+            Self::Timestamp => converted_list!(
+                chrono::NaiveDateTime,
+                TimestampMicrosecondBuilder::new(),
+                |v: chrono::NaiveDateTime| v.and_utc().timestamp_micros()
+            ),
+            Self::TimestampTz => converted_list!(
+                chrono::DateTime<chrono::Utc>,
+                TimestampMicrosecondBuilder::new().with_data_type(DataType::Timestamp(
+                    arrow::datatypes::TimeUnit::Microsecond,
+                    Some("UTC".into())
+                )),
+                |v: chrono::DateTime<chrono::Utc>| v.timestamp_micros()
+            ),
+            Self::Binary => list!(Vec<u8>, BinaryBuilder),
             Self::Bool => list!(bool, BooleanBuilder),
             Self::Int16 => list!(i16, Int16Builder),
             Self::Int32 => list!(i32, Int32Builder),
@@ -435,5 +608,37 @@ impl ArrayKind {
             Self::Float64 => list!(f64, Float64Builder),
             Self::Text => list!(String, StringBuilder),
         })
+    }
+}
+
+#[cfg(test)]
+mod type_tests {
+    use super::*;
+
+    #[test]
+    fn added_types_match_empty_batch_schemas() -> ExecutionResult<()> {
+        for name in [
+            "JSON",
+            "JSONB",
+            "OID",
+            "\"CHAR\"",
+            "INTERVAL",
+            "MONEY",
+            "BYTEA[]",
+            "UUID[]",
+            "NUMERIC[]",
+            "DATE[]",
+            "TIME[]",
+            "TIMESTAMP[]",
+            "TIMESTAMPTZ[]",
+        ] {
+            let kind = ColumnKind::parse(name)?;
+            assert_eq!(
+                kind.array(&[], 0)?.data_type(),
+                kind.field("value").data_type(),
+                "{name}"
+            );
+        }
+        Ok(())
     }
 }
