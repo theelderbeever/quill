@@ -6,12 +6,20 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+clap.workspace = true
 dirs = "7.0.0"
 figment.workspace = true
 indexmap.workspace = true
 quill-core.workspace = true
 quill-drivers.workspace = true
+quill-io.workspace = true
+quill-tui.workspace = true
 serde.workspace = true
+tokio.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
