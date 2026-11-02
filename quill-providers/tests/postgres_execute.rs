@@ -8,6 +8,7 @@ use quill_providers::{
 
 async fn pool() -> quill_core::error::Result<PostgresConnectionPool> {
     PostgresConnectionPool::connect(&PostgresSettings {
+        sslmode: quill_providers::postgres::SslMode::Disable,
         host: "localhost".into(),
         port: 5432,
         database: "quilt_test".into(),

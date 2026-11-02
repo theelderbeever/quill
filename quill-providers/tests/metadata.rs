@@ -66,6 +66,7 @@ async fn discover(
 #[ignore = "requires Docker Compose Postgres"]
 async fn postgres_metadata() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let pool = PostgresConnectionPool::connect(&PostgresSettings {
+        sslmode: quill_providers::postgres::SslMode::Disable,
         host: "localhost".into(),
         port: 5432,
         database: "quilt_test".into(),

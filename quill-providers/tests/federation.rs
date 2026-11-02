@@ -112,6 +112,7 @@ async fn joins_tables_across_connections() -> TestResult {
 async fn joins_postgres_with_mysql() -> TestResult {
     let pg: Arc<dyn ConnectionPool> = Arc::new(
         PostgresConnectionPool::connect(&PostgresSettings {
+            sslmode: quill_providers::postgres::SslMode::Disable,
             host: "localhost".into(),
             port: 5432,
             database: "quilt_test".into(),

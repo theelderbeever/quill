@@ -2,9 +2,10 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 use serde::Deserialize;
 
-/// TLS transport configuration. Presence enables TLS with certificate and
-/// hostname verification; absence on a connection selects plaintext.
-/// System trust roots are used unless `ca_cert` supplies a PEM CA bundle.
+/// Optional TLS certificates. Postgres selects transport and verification with
+/// its separate `sslmode` setting. For other providers, presence enables verified
+/// TLS and absence selects plaintext. System trust roots are used unless
+/// `ca_cert` supplies a PEM CA bundle.
 ///
 /// ```
 /// use quill_providers::settings::TlsSettings;

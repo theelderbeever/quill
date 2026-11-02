@@ -1,5 +1,5 @@
 mod settings;
-pub use settings::PostgresSettings;
+pub use settings::{PostgresSettings, SslMode};
 
 use std::sync::Arc;
 
@@ -32,17 +32,14 @@ impl PostgresSettings {
         set("port", &self.port.to_string());
         set("db", &self.database);
         set("user", &self.user);
-        match &self.tls {
-            None => set("sslmode", "disable"),
-            Some(tls) => {
-                if let Some(identity) = &tls.identity {
-                    set("sslcert", &identity.cert.to_string_lossy());
-                    set("sslkey", &identity.key.to_string_lossy());
-                }
-                set("sslmode", "verify-full");
-                if let Some(ca) = &tls.ca_cert {
-                    set("sslrootcert", &ca.to_string_lossy());
-                }
+        set("sslmode", self.sslmode.as_str());
+        if let Some(tls) = &self.tls {
+            if let Some(identity) = &tls.identity {
+                set("sslcert", &identity.cert.to_string_lossy());
+                set("sslkey", &identity.key.to_string_lossy());
+            }
+            if let Some(ca) = &tls.ca_cert {
+                set("sslrootcert", &ca.to_string_lossy());
             }
         }
         if let Some(password) = &self.password {
@@ -77,5 +74,42 @@ impl Tables for PostgresTableFactory {
     }
     fn table(&self, table: TableReference) -> PoolFuture<'_, Arc<dyn TableProvider>> {
         Box::pin(async move { factory_table(self.table_provider(table).await) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use secrecy::ExposeSecret;
+
+    const CONNECTION: &str = "host = 'localhost'\ndatabase = 'app'\nuser = 'user'\n";
+
+    #[test]
+    fn defaults_to_require_without_tls_settings() {
+        let settings: PostgresSettings = toml::from_str(CONNECTION).unwrap();
+        assert_eq!(settings.sslmode, SslMode::Require);
+        assert_eq!(
+            settings.provider_params().unwrap()["sslmode"].expose_secret(),
+            "require"
+        );
+    }
+
+    #[test]
+    fn forwards_explicit_modes_and_certificate_settings() {
+        for mode in ["disable", "prefer", "require", "verify-ca", "verify-full"] {
+            let text = format!(
+                "{CONNECTION}sslmode = '{mode}'\n[tls]\nca_cert = 'ca.pem'\n[tls.identity]\ncert = 'client.pem'\nkey = 'client.key'\n[params]\nsslmode = 'invalid'"
+            );
+            let settings: PostgresSettings = toml::from_str(&text).unwrap();
+            let params = settings.provider_params().unwrap();
+            assert_eq!(params["sslmode"].expose_secret(), mode);
+            assert_eq!(params["sslrootcert"].expose_secret(), "ca.pem");
+            assert_eq!(params["sslcert"].expose_secret(), "client.pem");
+            assert_eq!(params["sslkey"].expose_secret(), "client.key");
+        }
+        assert!(
+            toml::from_str::<PostgresSettings>(&format!("{CONNECTION}sslmode = 'invalid'"))
+                .is_err()
+        );
     }
 }

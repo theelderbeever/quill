@@ -70,3 +70,28 @@ Stop the development services when finished:
 ```sh
 docker compose -f docker-compose.yaml -f docker-compose.tls.yaml down
 ```
+
+Postgres connections default to `sslmode = "require"`: TLS is required, without
+server certificate verification. Set `sslmode = "verify-ca"` to verify the trust
+chain or `"verify-full"` to also verify the hostname. `"disable"` selects plaintext;
+`"prefer"` allows the driver to fall back to plaintext.
+
+```toml
+[connection.app]
+kind = "postgres"
+host = "db.example.com"
+database = "app"
+user = "app"
+sslmode = "verify-full"
+
+[connection.app.tls]
+ca_cert = "/path/to/ca.pem" # Optional; otherwise use system trust roots.
+
+# Optional client identity for mutual TLS:
+# [connection.app.tls.identity]
+# cert = "/path/to/client.pem"
+# key = "/path/to/client.key"
+```
+
+The typed `sslmode` setting takes precedence over `params.sslmode`. Other providers
+retain their existing TLS defaults.
