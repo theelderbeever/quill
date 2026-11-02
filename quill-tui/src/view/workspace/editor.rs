@@ -108,12 +108,11 @@ impl Editor {
         self.touched = Some(Instant::now());
     }
 
-    /// The selection if there is one, else the whole buffer.
+    /// The semicolon-delimited statement containing the cursor.
     pub fn sql_to_run(&mut self) -> String {
-        self.inner
-            .get_selection_text()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| self.inner.get_content())
+        let cursor = self.inner.code_ref().char_to_byte(self.inner.get_cursor());
+        let text = self.inner.get_content();
+        statement_at(&text, cursor).to_owned()
     }
 
     /// Text to save once `delay` has passed since the last edit.
@@ -226,9 +225,121 @@ impl Component for Editor {
     }
 }
 
+/// Statement delimiters exclude quoted text, dollar strings, and SQL comments.
+fn statement_at(sql: &str, cursor: usize) -> &str {
+    let bytes = sql.as_bytes();
+    let mut start = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\'' | b'"' | b'`' | b'[' => {
+                let quote = bytes[at];
+                let close = if quote == b'[' { b']' } else { quote };
+                at += 1;
+                while at < bytes.len() {
+                    if bytes[at] == close {
+                        at += 1;
+                        if bytes.get(at) != Some(&close) {
+                            break;
+                        }
+                    }
+                    at += 1;
+                }
+            }
+            b'-' if bytes.get(at + 1) == Some(&b'-') => {
+                at += 2;
+                while at < bytes.len() && bytes[at] != b'\n' {
+                    at += 1;
+                }
+            }
+            b'/' if bytes.get(at + 1) == Some(&b'*') => {
+                at += 2;
+                let mut depth = 1;
+                while at < bytes.len() && depth > 0 {
+                    if bytes[at..].starts_with(b"/*") {
+                        depth += 1;
+                        at += 2;
+                    } else if bytes[at..].starts_with(b"*/") {
+                        depth -= 1;
+                        at += 2;
+                    } else {
+                        at += 1;
+                    }
+                }
+            }
+            b'$' => {
+                let tag_start = at;
+                at += 1;
+                if bytes
+                    .get(at)
+                    .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+                {
+                    while bytes
+                        .get(at)
+                        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                    {
+                        at += 1;
+                    }
+                }
+                if bytes.get(at) == Some(&b'$') {
+                    at += 1;
+                    let delimiter = &sql[tag_start..at];
+                    at = sql[at..]
+                        .find(delimiter)
+                        .map_or(bytes.len(), |end| at + end + delimiter.len());
+                }
+            }
+            b';' => {
+                if cursor <= at {
+                    return sql[start..at].trim();
+                }
+                start = at + 1;
+                at += 1;
+            }
+            _ => at += 1,
+        }
+    }
+    sql[start..].trim()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runs_only_the_statement_at_the_cursor() {
+        let mut editor = Editor::new("SELECT 'é';\nSELECT 2;".into()).unwrap();
+        editor.inner.set_cursor(3);
+        editor.inner.extend_selection(21);
+        assert_eq!(editor.sql_to_run(), "SELECT 'é'");
+        editor.inner.clear_selection();
+        editor.inner.set_cursor(10);
+        assert_eq!(editor.sql_to_run(), "SELECT 'é'");
+        editor.inner.set_cursor(12);
+        assert_eq!(editor.sql_to_run(), "SELECT 2");
+        editor.inner.set_cursor(21);
+        assert_eq!(editor.sql_to_run(), "");
+    }
+
+    #[test]
+    fn delimiters_inside_quotes_and_comments_are_ignored() {
+        for sql in [
+            "SELECT ';', \";\", `;`, [;]",
+            "SELECT 'it''s; fine'",
+            "SELECT $$;$$, $body$;$body$",
+            "SELECT 1 /* outer; /* inner; */ ; */",
+            "-- comment;\nSELECT 1",
+        ] {
+            let text = format!("{sql}; SELECT 2");
+            assert_eq!(statement_at(&text, 0), sql);
+            assert_eq!(statement_at(&text, text.len()), "SELECT 2");
+        }
+        assert_eq!(statement_at("; ;", 2), "");
+        assert_eq!(
+            statement_at("SELECT 'unfinished;", 0),
+            "SELECT 'unfinished;"
+        );
+    }
 
     #[test]
     fn delete_removes_the_character_after_the_cursor() {

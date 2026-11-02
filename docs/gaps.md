@@ -18,6 +18,8 @@ through query events without conversion.
 Still outstanding:
 
 - Multi-statement/multiple-result execution: the fork executor returns one Arrow stream.
+  The editor submits only the semicolon-delimited statement at the cursor; selections
+  do not enable multi-statement execution.
 - Server metrics lookup and ClickHouse permission-denied classification. Query IDs
   now reach native execution, but metrics retrieval is not wired.
 - Cassandra driver history: the fork accepts a history listener extension; Quill
