@@ -555,6 +555,13 @@ mod tests {
         assert!(app.should_quit());
     }
 
+    /// Result tables registered on a connection's session.
+    fn tables(session: &datafusion::prelude::SessionContext) -> usize {
+        let catalog = session.catalog("datafusion").expect("default catalog");
+        let schema = catalog.schema("public").expect("default schema");
+        schema.table_names().len()
+    }
+
     /// Receive background messages until `done` holds, redrawing between them.
     async fn pump(
         app: &mut App,
@@ -562,25 +569,24 @@ mod tests {
         done: impl Fn(&str) -> bool,
     ) -> String {
         let deadline = std::time::Duration::from_secs(10);
-        tokio::time::timeout(deadline, async {
+        let mut last = String::new();
+        let waited = tokio::time::timeout(deadline, async {
             loop {
-                let screen = screen(app, 160);
-                if done(&screen) {
-                    return screen;
+                last = screen(app, 160);
+                if done(&last) {
+                    return last.clone();
                 }
                 let msg = rx.recv().await.expect("channel open");
                 app.handle(Event::Msg(msg));
             }
         })
-        .await
-        .expect("condition before timeout")
+        .await;
+        waited.unwrap_or_else(|_| panic!("condition before timeout; last screen:\n{last}"))
     }
 
     #[tokio::test]
     async fn runs_a_query_and_pages_through_the_results() {
-        use quill_drivers::{
-            ConnectionPool, settings::SqliteSettings, sqlite::SqliteConnectionPool,
-        };
+        use quill_providers::{Connect, settings::SqliteSettings, sqlite::SqliteConnectionPool};
 
         let dir = tempfile::tempdir().unwrap();
         let queries = dir.path().join("queries");
@@ -598,14 +604,14 @@ mod tests {
             connections: vec![("lite".into(), source)],
         }]);
         let start = connections.lookup("lite");
-        let (mut shared, mut rx) = shared(connections);
-        shared.results_dir = dir.path().join("results");
+        let (shared, mut rx) = shared(connections);
         let mut app = App::new(shared, start);
 
         // Swap the offline attempt for a real in-memory SQLite pool.
         let lite = id(&app.shared.connections, "lite");
         let settings = SqliteSettings {
             path: ":memory:".into(),
+            busy_timeout_ms: 5000,
             params: Default::default(),
         };
         let pool = SqliteConnectionPool::connect(&settings).await.unwrap();
@@ -631,7 +637,7 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         assert!(!screen(&mut app, 160).contains("label · row 1000"));
 
-        // Statistics profile the whole result once the drain finishes.
+        // Statistics profile the whole result once collection finishes.
         let stats = pump(&mut app, &mut rx, |s| s.contains("scanned 1,000 rows")).await;
         assert!(stats.contains("nulls"), "{stats}");
 
@@ -650,7 +656,7 @@ mod tests {
             .unwrap_or_default();
         assert!(first_row.contains("row 1000"), "{sorted}");
 
-        // A results condition re-drains just the matching rows.
+        // A results condition collects just the matching rows.
         press(&mut app, KeyCode::Char('/'));
         type_text(&mut app, "x <= 3");
         press(&mut app, KeyCode::Enter);
@@ -671,24 +677,19 @@ mod tests {
             ["x,label", "3,row 3", "2,row 2", "1,row 1"]
         );
 
-        // Leaving the workspace keeps the run's result files; disconnecting
-        // removes them.
-        let runs = || {
-            std::fs::read_dir(dir.path().join("results"))
-                .unwrap()
-                .count()
-        };
+        // Leaving the workspace keeps the run's result; disconnecting drops it.
+        let session = app.shared.connections.results(&lite).unwrap();
+        let runs = || tables(&session);
         press(&mut app, KeyCode::Esc);
-        assert_eq!(runs(), 1);
+        // The base result and the filtered view drawn from it.
+        assert_eq!(runs(), 2);
         type_command(&mut app, "disconnect");
         assert_eq!(runs(), 0);
     }
 
     #[tokio::test]
     async fn tabs_keep_their_results_until_disconnect() {
-        use quill_drivers::{
-            ConnectionPool, settings::SqliteSettings, sqlite::SqliteConnectionPool,
-        };
+        use quill_providers::{Connect, settings::SqliteSettings, sqlite::SqliteConnectionPool};
 
         let dir = tempfile::tempdir().unwrap();
         let queries = dir.path().join("queries");
@@ -702,12 +703,12 @@ mod tests {
             connections: vec![("lite".into(), source)],
         }]);
         let start = connections.lookup("lite");
-        let (mut shared, mut rx) = shared(connections);
-        shared.results_dir = dir.path().join("results");
+        let (shared, mut rx) = shared(connections);
         let mut app = App::new(shared, start);
         let lite = id(&app.shared.connections, "lite");
         let settings = SqliteSettings {
             path: ":memory:".into(),
+            busy_timeout_ms: 5000,
             params: Default::default(),
         };
         let pool = SqliteConnectionPool::connect(&settings).await.unwrap();
@@ -735,11 +736,8 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert!(screen(&mut app, 160).contains("results · 1 rows"));
 
-        let runs = || {
-            std::fs::read_dir(dir.path().join("results"))
-                .unwrap()
-                .count()
-        };
+        let session = app.shared.connections.results(&lite).unwrap();
+        let runs = || tables(&session);
         assert_eq!(runs(), 1);
         type_command(&mut app, "disconnect");
         assert_eq!(runs(), 0);
@@ -749,8 +747,8 @@ mod tests {
     async fn catalog_puts_a_select_into_the_editor() {
         use futures::StreamExt;
         use quill_core::query::QueryRequest;
-        use quill_drivers::{
-            ConnectionPool, settings::SqliteSettings, sqlite::SqliteConnectionPool,
+        use quill_providers::{
+            Connect, ConnectionPool, settings::SqliteSettings, sqlite::SqliteConnectionPool,
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -769,6 +767,7 @@ mod tests {
 
         let settings = SqliteSettings {
             path: ":memory:".into(),
+            busy_timeout_ms: 5000,
             params: Default::default(),
         };
         let pool = SqliteConnectionPool::connect(&settings).await.unwrap();

@@ -1,9 +1,8 @@
-//! A paged, column-scrolled view of one stored result.
+//! A paged, column-scrolled view of one result.
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use datafusion::prelude::SessionContext;
-use quill_io::feather::{FeatherTable, StoredResult};
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
@@ -19,10 +18,10 @@ use super::{
 };
 use crate::{
     component::Context,
+    result::ResultTable,
     task::{
         RunId,
-        page::{self, Cell, Page, TABLE},
-        run::ResultDir,
+        page::{self, Cell, Page},
     },
     widget::theme,
 };
@@ -46,6 +45,8 @@ struct DrawnColumn {
 
 pub struct Grid {
     run: RunId,
+    table: Arc<ResultTable>,
+    /// Order-preserving context over `table`.
     ctx: SessionContext,
     columns: Vec<String>,
     rows: u64,
@@ -63,28 +64,21 @@ pub struct Grid {
     /// Column whose right edge is being dragged, and its left edge.
     dragging: Option<(usize, u16)>,
     pages: PageCache,
-    _dir: Option<ResultDir>,
 }
 
 impl Grid {
-    /// `dir` is removed with the grid; `None` when another owner keeps it.
-    pub fn new(
-        run: RunId,
-        result: Arc<StoredResult>,
-        dir: Option<ResultDir>,
-        page_rows: u64,
-    ) -> anyhow::Result<Self> {
-        let columns = result
+    pub fn new(run: RunId, table: Arc<ResultTable>, page_rows: u64) -> Self {
+        let columns = table
             .schema()
             .fields()
             .iter()
             .map(|f| f.name().clone())
             .collect();
-        let rows = result.rows();
-        let ctx = SessionContext::new();
-        ctx.register_table(TABLE, Arc::new(FeatherTable::new(result)?))?;
-        Ok(Self {
+        let rows = table.rows();
+        let ctx = table.ordered();
+        Self {
             run,
+            table,
             ctx,
             columns,
             rows,
@@ -98,8 +92,7 @@ impl Grid {
             body_y: 0,
             dragging: None,
             pages: PageCache::new(page_rows, rows),
-            _dir: dir,
-        })
+        }
     }
 
     pub const fn run(&self) -> RunId {
@@ -110,7 +103,12 @@ impl Grid {
         self.rows
     }
 
-    /// Context with this result registered as `r`, including `__row`.
+    /// The shown rows, in shown order.
+    pub const fn table(&self) -> &Arc<ResultTable> {
+        &self.table
+    }
+
+    /// Order-preserving context over [`Self::table`].
     pub const fn context(&self) -> &SessionContext {
         &self.ctx
     }
@@ -247,6 +245,7 @@ impl Grid {
         for (index, rows) in self.pages.request(visible.clone()) {
             page::spawn(
                 self.ctx.clone(),
+                self.table.sql_name(),
                 self.run,
                 index,
                 rows,

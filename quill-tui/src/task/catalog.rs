@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use quill_core::metadata::{CatalogRef, ColumnMetadata, SchemaRef, TableRef};
-use quill_drivers::ConnectionPool;
+use quill_providers::ConnectionPool;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{connection::ConnectionId, event::Msg};

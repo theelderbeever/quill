@@ -4,7 +4,7 @@ use std::{sync::Arc, time::Duration};
 use anyhow::Context as _;
 use crossterm::event::EventStream;
 use futures::StreamExt;
-use quill_drivers::ConnectionPool;
+use quill_providers::ConnectionPool;
 use tokio::{
     sync::mpsc::UnboundedReceiver,
     time::{Interval, MissedTickBehavior},

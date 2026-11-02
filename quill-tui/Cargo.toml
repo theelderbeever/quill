@@ -13,13 +13,11 @@ datafusion.workspace = true
 futures.workspace = true
 indexmap.workspace = true
 quill-core.workspace = true
-quill-drivers.workspace = true
-quill-io = { workspace = true, features = ["datafusion"] }
+quill-providers.workspace = true
 ratatui.workspace = true
 ratatui-code-editor.workspace = true
 serde_json.workspace = true
 shellexpand = "3"
-tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tree-sitter-sequel.workspace = true
@@ -27,7 +25,8 @@ unicode-width.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-quill-drivers.workspace = true
+quill-providers.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -8,7 +8,7 @@ use arrow::{
 };
 use datafusion::prelude::SessionContext;
 use quill_core::query::QueryId;
-use quill_drivers::ConnectionPool;
+use quill_providers::ConnectionPool;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::{RunId, RunMsg};
@@ -45,16 +45,16 @@ fn orderable(data_type: &DataType) -> bool {
         )
 }
 
-/// Profile `table` in `ctx` with one full scan.
+/// Profile `table`, a quoted name in `ctx`, with one full scan.
 pub fn spawn_profile(
     ctx: SessionContext,
-    table: &'static str,
+    table: String,
     schema: SchemaRef,
     run: RunId,
     messages: UnboundedSender<Msg>,
 ) {
     tokio::spawn(async move {
-        let result = profile(&ctx, table, &schema).await;
+        let result = profile(&ctx, &table, &schema).await;
         let _ = messages.send(Msg::Run(RunMsg::Profile { run, result }));
     });
 }

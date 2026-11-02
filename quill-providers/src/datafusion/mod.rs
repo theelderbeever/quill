@@ -1,0 +1,417 @@
+mod metadata;
+use metadata::ColumnField;
+
+mod settings;
+pub use settings::{
+    DatafusionSettings, FileFormat, FileTableSettings, ObjectStoreBuildError, ObjectStoreProvider,
+    ObjectStoreSettings,
+};
+
+use datafusion::{
+    catalog::TableProvider,
+    physical_plan::ExecutionPlan,
+    prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionContext},
+};
+use quill_core::{
+    error::{Error, Result},
+    metadata::*,
+    query::{QueryId, ServerMetrics},
+};
+use std::{sync::Arc, time::Duration};
+
+use crate::{ConnectionPool, PoolFuture};
+
+/// An embedded DataFusion session shared through the connection-pool interface.
+/// The session owns its runtime, registered stores, and table catalog.
+pub struct DatafusionConnectionPool {
+    inner: SessionContext,
+    /// Plan metrics for recently finished executions, bounded by `retained_metrics`.
+    metrics: moka::sync::Cache<QueryId, ServerMetrics>,
+}
+
+impl DatafusionConnectionPool {
+    /// Access the session to plan SQL or stream Arrow results.
+    ///
+    /// ```no_run
+    /// use quill_providers::datafusion::DatafusionConnectionPool;
+    ///
+    /// async fn query(pool: &DatafusionConnectionPool) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    ///     let frame = pool.inner().sql("SELECT 1").await?;
+    ///     let stream = frame.execute_stream().await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub fn inner(&self) -> &SessionContext {
+        &self.inner
+    }
+
+    /// Serve an existing session, keeping plan metrics for the most recent
+    /// `retained_metrics` executions.
+    pub fn from_context(inner: SessionContext, retained_metrics: u64) -> Self {
+        Self {
+            inner,
+            // LRU rather than TinyLFU: each id is inserted once, and admission
+            // filtering would reject new entries once the cache is full.
+            metrics: moka::sync::Cache::builder()
+                .max_capacity(retained_metrics)
+                .eviction_policy(moka::policy::EvictionPolicy::lru())
+                .build(),
+        }
+    }
+}
+
+impl DatafusionConnectionPool {
+    /// Aggregate operator metrics across the whole plan tree. Leaf output is what
+    /// the scans read; root output is what the query returned.
+    fn plan_metrics(plan: &Arc<dyn ExecutionPlan>) -> ServerMetrics {
+        fn add(total: &mut Option<u64>, value: Option<usize>) {
+            if let Some(value) = value {
+                *total = Some(total.unwrap_or(0) + value as u64);
+            }
+        }
+        let mut metrics = ServerMetrics {
+            result_rows: plan
+                .metrics()
+                .and_then(|set| set.output_rows())
+                .map(|rows| rows as u64),
+            ..ServerMetrics::unknown()
+        };
+        let mut compute_nanos = None;
+        let mut pending = vec![plan];
+        while let Some(node) = pending.pop() {
+            let children = node.children();
+            if let Some(set) = node.metrics() {
+                if children.is_empty() {
+                    add(&mut metrics.read_rows, set.output_rows());
+                }
+                add(
+                    &mut metrics.read_bytes,
+                    set.sum_by_name("bytes_scanned")
+                        .map(|value| value.as_usize()),
+                );
+                add(&mut metrics.spilled_bytes, set.spilled_bytes());
+                add(&mut compute_nanos, set.elapsed_compute());
+            }
+            pending.extend(children);
+        }
+        metrics.compute_time = compute_nanos.map(Duration::from_nanos);
+        metrics
+    }
+}
+
+impl ConnectionPool for DatafusionConnectionPool {
+    fn execute(
+        &self,
+        request: quill_core::query::QueryRequest,
+    ) -> PoolFuture<'_, quill_core::query::QueryExecution> {
+        let client = self.inner.clone();
+        let retained = self.metrics.clone();
+        let id = QueryId::new();
+        Box::pin(async move {
+            Ok(crate::execution::start_with_id(
+                id,
+                move |sender, control| async move {
+                    use futures::TryStreamExt;
+                    use quill_core::query::QueryEvent;
+                    if !request.bindings.named.is_empty() || !request.bindings.positional.is_empty()
+                    {
+                        return Err(Error::UnsupportedOperation("query parameters"));
+                    }
+                    let frame = client
+                        .sql(&request.sql)
+                        .await
+                        .map_err(|e| Error::QueryExecution(Box::new(e)))?;
+                    let task = Arc::new(frame.task_ctx());
+                    let plan = frame
+                        .create_physical_plan()
+                        .await
+                        .map_err(|e| Error::QueryExecution(Box::new(e)))?;
+                    let stream = async {
+                        let mut stream =
+                            datafusion::physical_plan::execute_stream(plan.clone(), task)
+                                .map_err(|e| Error::QueryExecution(Box::new(e)))?;
+                        control
+                            .send(
+                                &sender,
+                                QueryEvent::Schema {
+                                    result_set: 0,
+                                    schema: stream.schema(),
+                                },
+                            )
+                            .await?;
+                        while let Some(batch) = stream
+                            .try_next()
+                            .await
+                            .map_err(|e| Error::QueryExecution(Box::new(e)))?
+                        {
+                            control
+                                .send(
+                                    &sender,
+                                    QueryEvent::Batch {
+                                        result_set: 0,
+                                        batch,
+                                    },
+                                )
+                                .await?;
+                        }
+                        control
+                            .send(
+                                &sender,
+                                QueryEvent::ResultSetComplete {
+                                    result_set: 0,
+                                    affected_rows: None,
+                                },
+                            )
+                            .await
+                    };
+                    // Failed executions keep the metrics gathered up to the failure.
+                    let result = stream.await;
+                    retained.insert(id, Self::plan_metrics(&plan));
+                    result
+                },
+            ))
+        })
+    }
+
+    /// Plan metrics are recorded when an execution completes or fails, and kept
+    /// for the most recent `retained_metrics` executions. Cancelled executions
+    /// record none.
+    fn execution_metrics(&self, id: QueryId) -> PoolFuture<'_, Option<ServerMetrics>> {
+        Box::pin(async move { Ok(self.metrics.get(&id)) })
+    }
+
+    fn list_catalogs(&self) -> PoolFuture<'_, Vec<CatalogRef>> {
+        Box::pin(async {
+            let mut names = self.inner.catalog_names();
+            names.sort();
+            Ok(names.into_iter().map(|name| CatalogRef { name }).collect())
+        })
+    }
+    fn list_schemas<'a>(&'a self, catalog: &'a CatalogRef) -> PoolFuture<'a, Vec<SchemaRef>> {
+        Box::pin(async move {
+            let Some(provider) = self.inner.catalog(&catalog.name) else {
+                return Ok(Vec::new());
+            };
+            let mut names = provider.schema_names();
+            names.sort();
+            Ok(names
+                .into_iter()
+                .map(|name| SchemaRef {
+                    catalog: catalog.clone(),
+                    name,
+                })
+                .collect())
+        })
+    }
+    fn list_tables<'a>(&'a self, schema: &'a SchemaRef) -> PoolFuture<'a, Vec<TableRef>> {
+        Box::pin(async move {
+            let Some(provider) = self
+                .inner
+                .catalog(&schema.catalog.name)
+                .and_then(|c| c.schema(&schema.name))
+            else {
+                return Ok(Vec::new());
+            };
+            let mut names = provider.table_names();
+            names.sort();
+            Ok(names
+                .into_iter()
+                .map(|name| TableRef {
+                    schema: schema.clone(),
+                    name,
+                })
+                .collect())
+        })
+    }
+    fn table_provider<'a>(&'a self, table: &'a TableRef) -> PoolFuture<'a, Arc<dyn TableProvider>> {
+        Box::pin(async move {
+            let schema = self
+                .inner
+                .catalog(&table.schema.catalog.name)
+                .and_then(|c| c.schema(&table.schema.name))
+                .ok_or_else(|| Error::DriverExecute(anyhow::anyhow!("schema not found")))?;
+            schema
+                .table(&table.name)
+                .await
+                .map_err(|e| Error::DriverExecute(e.into()))?
+                .ok_or_else(|| Error::DriverExecute(anyhow::anyhow!("table not found")))
+        })
+    }
+
+    fn describe_table<'a>(&'a self, table: &'a TableRef) -> PoolFuture<'a, TableMetadata> {
+        Box::pin(async move {
+            let provider = self
+                .inner
+                .catalog(&table.schema.catalog.name)
+                .and_then(|c| c.schema(&table.schema.name))
+                .ok_or_else(|| Error::DriverExecute(anyhow::anyhow!("schema not found")))?;
+            let provider = provider
+                .table(&table.name)
+                .await
+                .map_err(|e| Error::DriverExecute(e.into()))?
+                .ok_or_else(|| Error::DriverExecute(anyhow::anyhow!("table not found")))?;
+            Ok(TableMetadata {
+                table: table.clone(),
+                columns: provider
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|field| ColumnMetadata::from(ColumnField(field)))
+                    .collect(),
+            })
+        })
+    }
+}
+
+impl crate::Connect for DatafusionConnectionPool {
+    type Settings = DatafusionSettings;
+
+    async fn connect(settings: &Self::Settings) -> Result<Self> {
+        let connect = async {
+            let inner = SessionContext::new();
+            let mut authorities = std::collections::BTreeSet::new();
+            for config in &settings.object_stores {
+                let (url, store) = config.build()?;
+                let authority = url[..url::Position::BeforePath].to_owned();
+                if url.scheme() != "file" {
+                    anyhow::ensure!(
+                        authorities.insert(authority),
+                        "duplicate object store authority"
+                    );
+                }
+                inner.register_object_store(&url, store);
+                for table in &config.tables {
+                    let path = url.join(&table.path)?;
+                    anyhow::ensure!(
+                        path.scheme() == url.scheme()
+                            && path.host_str() == url.host_str()
+                            && path.port() == url.port()
+                            && path.username().is_empty()
+                            && path.password().is_none()
+                            && path.query().is_none()
+                            && path.fragment().is_none(),
+                        "table path must belong to its parent object store"
+                    );
+                    anyhow::ensure!(
+                        !inner.table_exist(table.name.as_str())?,
+                        "duplicate table name"
+                    );
+                    match &table.format {
+                        FileFormat::Parquet => {
+                            inner
+                                .register_parquet(
+                                    table.name.as_str(),
+                                    path.as_str(),
+                                    ParquetReadOptions::default(),
+                                )
+                                .await?
+                        }
+                        FileFormat::Csv { has_header } => {
+                            inner
+                                .register_csv(
+                                    table.name.as_str(),
+                                    path.as_str(),
+                                    CsvReadOptions::new().has_header(*has_header),
+                                )
+                                .await?
+                        }
+                        FileFormat::Json => {
+                            inner
+                                .register_json(
+                                    table.name.as_str(),
+                                    path.as_str(),
+                                    JsonReadOptions::default(),
+                                )
+                                .await?
+                        }
+                    }
+                }
+            }
+            Ok::<_, anyhow::Error>(Self::from_context(inner, settings.retained_metrics))
+        };
+        connect.await.map_err(|source| Error::DriverConnect {
+            connection: "datafusion".into(),
+            source,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Connect;
+
+    #[tokio::test]
+    async fn queries_tables_nested_under_a_local_store()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let csv = root.path().join("csv");
+        let json = root.path().join("json");
+        let parquet = root.path().join("parquet");
+        std::fs::create_dir(&csv)?;
+        std::fs::create_dir(&json)?;
+        std::fs::write(csv.join("one.csv"), "id\n1\n")?;
+        std::fs::write(csv.join("two.csv"), "id\n2\n")?;
+        std::fs::write(json.join("one.json"), "{\"id\":3}\n")?;
+        let mut settings = DatafusionSettings {
+            object_stores: vec![ObjectStoreSettings {
+                provider: ObjectStoreProvider::Local {
+                    path: root.path().to_owned(),
+                },
+                options: Default::default(),
+                tables: vec![
+                    FileTableSettings {
+                        name: "csv_data".into(),
+                        path: "csv/".into(),
+                        format: FileFormat::Csv { has_header: true },
+                    },
+                    FileTableSettings {
+                        name: "json_data".into(),
+                        path: "json/".into(),
+                        format: FileFormat::Json,
+                    },
+                ],
+            }],
+            retained_metrics: 1,
+        };
+        let pool = DatafusionConnectionPool::connect(&settings).await?;
+        pool.inner()
+            .sql(&format!(
+                "COPY csv_data TO '{}/' STORED AS PARQUET",
+                parquet.display()
+            ))
+            .await?
+            .collect()
+            .await?;
+        settings.object_stores[0].tables.push(FileTableSettings {
+            name: "parquet_data".into(),
+            path: "parquet/".into(),
+            format: FileFormat::Parquet,
+        });
+        let pool = DatafusionConnectionPool::connect(&settings).await?;
+        let batches = pool.inner().sql("SELECT id FROM csv_data UNION ALL SELECT id FROM json_data UNION ALL SELECT id FROM parquet_data").await?.collect().await?;
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            5
+        );
+        let shared: Arc<dyn ConnectionPool> = Arc::new(pool);
+        let catalogs = shared.list_catalogs().await?;
+        let schemas = shared.list_schemas(&catalogs[0]).await?;
+        let schema = schemas
+            .iter()
+            .find(|s| s.name == "public")
+            .ok_or_else(|| anyhow::anyhow!("missing schema"))?;
+        let tables = shared.list_tables(schema).await?;
+        let table = tables
+            .iter()
+            .find(|t| t.name == "csv_data")
+            .ok_or_else(|| anyhow::anyhow!("missing table"))?;
+        let metadata = shared.describe_table(table).await?;
+        assert_eq!(metadata.columns[0].name, "id");
+        assert!(matches!(
+            shared.list_indexes(table).await,
+            Err(Error::UnsupportedOperation(_))
+        ));
+        Ok(())
+    }
+}

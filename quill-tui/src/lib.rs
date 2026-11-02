@@ -8,14 +8,14 @@ mod event;
 mod filter;
 mod format;
 mod path;
+pub mod result;
 mod store;
 mod task;
 mod view;
 mod widget;
 
-use std::{num::NonZeroU64, path::PathBuf, time::Duration};
+use std::{num::NonZeroU64, time::Duration};
 
-use anyhow::Context as _;
 use crossterm::{
     event::{
         DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
@@ -23,7 +23,6 @@ use crossterm::{
     },
     terminal::supports_keyboard_enhancement,
 };
-use quill_io::feather::ByteLimit;
 use tokio::sync::mpsc;
 
 pub use connection::{ConnectionGroup, ConnectionId, ConnectionSource, Connections, Target, quote};
@@ -37,10 +36,6 @@ pub struct Options {
     pub redraw: Duration,
     /// Pause after the last edit before a query is saved.
     pub autosave: Duration,
-    /// Parent of the per-session results directory.
-    pub results_dir: PathBuf,
-    /// Bytes drained per run before it stops; unlimited when `None`.
-    pub byte_limit: Option<ByteLimit>,
     /// Result rows fetched per page.
     pub page_rows: NonZeroU64,
     /// Widest an auto-sized result column grows, in cells.
@@ -52,7 +47,7 @@ pub struct Options {
 /// ```no_run
 /// # use std::{num::NonZeroU64, path::Path, sync::Arc, time::Duration};
 /// # use quill_core::error::Error;
-/// # use quill_drivers::{ConnectionPool, PoolFuture};
+/// # use quill_providers::{ConnectionPool, PoolFuture};
 /// # use quill_tui::{ConnectionGroup, ConnectionSource, Connections, Options};
 /// # struct Offline;
 /// # impl ConnectionSource for Offline {
@@ -73,8 +68,6 @@ pub struct Options {
 /// let options = Options {
 ///     redraw: Duration::from_millis(100),
 ///     autosave: Duration::from_millis(750),
-///     results_dir: std::env::temp_dir(),
-///     byte_limit: None,
 ///     page_rows: NonZeroU64::new(500).unwrap(),
 ///     max_column_width: 40,
 /// };
@@ -86,18 +79,6 @@ pub async fn run(
     start: Option<Target>,
     options: Options,
 ) -> anyhow::Result<()> {
-    std::fs::create_dir_all(&options.results_dir)
-        .with_context(|| format!("create {}", options.results_dir.display()))?;
-    let session = tempfile::Builder::new()
-        .prefix("quill-")
-        .tempdir_in(&options.results_dir)
-        .with_context(|| {
-            format!(
-                "create a session directory in {}",
-                options.results_dir.display()
-            )
-        })?;
-
     let mut terminal = ratatui::try_init()?;
     let restore = Restore {
         keyboard: supports_keyboard_enhancement().unwrap_or(false),
@@ -114,7 +95,6 @@ pub async fn run(
     let shared = Shared {
         connections,
         options,
-        results_dir: session.path().to_path_buf(),
         messages,
     };
     let mut app = App::new(shared, start);

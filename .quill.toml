@@ -27,7 +27,7 @@ password = "password"
 tls = { ca_cert = "docker/tls/certs/ca.pem" }
 
 [connection.scylla]
-kind = "scylla"
+kind = "cassandra"
 nodes = ["localhost:9042"]
 tls = { ca_cert = "docker/tls/certs/ca.pem" }
 # No authentication or keyspace is provisioned by Compose.
@@ -63,3 +63,9 @@ secret_access_key = "password"
 options = { aws_allow_invalid_certificates = "true" }
 # Create the quill bucket and upload files before registering tables.
 tables = []
+
+[workspace.postgres_clickhouse]
+connections = [
+  { conn = "postgres", alias = "pg" },
+  { conn = "clickhouse", alias = "ch" },
+]

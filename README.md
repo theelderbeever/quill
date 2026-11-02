@@ -1,6 +1,7 @@
 # Quill
 
-A Rust-native, multi-database SQL editor.
+A Rust-native, multi-database SQL editor. Connections are built on DataFusion table
+providers; workspaces federate several connections into one DataFusion session.
 
 ## Testing
 
@@ -25,19 +26,23 @@ just docker --tls
 Wait for the databases to finish starting, then run:
 
 ```sh
-QUILL_TEST_TLS=1 cargo test -p quill-drivers --test metadata -- --ignored
+QUILL_TEST_TLS=1 cargo test -p quill-providers --test metadata -- --ignored
 ```
 
-The tests verify catalog, schema, table, column, and index discovery for Postgres,
-MySQL, ClickHouse, and Scylla, including missing-table errors. They use the local
+The tests verify catalog, schema, table, and column discovery for Postgres, MySQL,
+ClickHouse, and Cassandra (the Compose Scylla service), including missing-table errors. They use the local
 CA in `docker/tls/certs/ca.pem` for the services configured with TLS. Postgres uses
 plaintext in the current Compose setup.
 
-Postgres query execution tests use the same Compose Postgres service:
+Run every database test, including per-driver execution and a Postgres–MySQL
+federated join:
 
 ```sh
-cargo test -p quill-drivers --test postgres_execute -- --ignored
+QUILL_TEST_TLS=1 cargo test --no-fail-fast -p quill-providers -- --ignored
 ```
+
+A few execution tests stay ignored with an `upstream provider …` reason; they document
+gaps tracked in [`docs/gaps.md`](docs/gaps.md) and fail until those are fixed.
 
 ### Compose without TLS
 
@@ -50,7 +55,7 @@ just docker
 Wait for the databases to finish starting, then run without `QUILL_TEST_TLS`:
 
 ```sh
-cargo test -p quill-drivers --test metadata -- --ignored
+cargo test -p quill-providers --test metadata -- --ignored
 ```
 
 ### Checks and cleanup

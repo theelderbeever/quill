@@ -1,5 +1,5 @@
 //! App settings from `QUILL_HOME/config.toml`, overridable by `QUILL__` variables.
-use std::{num::NonZeroU64, path::PathBuf, time::Duration};
+use std::{num::NonZeroU64, time::Duration};
 
 use figment::{
     Figment,
@@ -13,25 +13,7 @@ use quill_core::error::{Error, Result};
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Settings {
     #[serde(default)]
-    pub results: ResultSettings,
-    #[serde(default)]
     pub ui: UiSettings,
-}
-
-/// Where drained query results are written. Each session gets its own
-/// temporary directory, removed when the session ends.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct ResultSettings {
-    /// Parent of per-session directories; the system temp directory when unset.
-    pub dir: Option<PathBuf>,
-    /// Bytes written per query before streaming stops; unlimited when unset.
-    pub max_bytes: Option<NonZeroU64>,
-}
-
-impl ResultSettings {
-    pub fn dir(&self) -> PathBuf {
-        self.dir.clone().unwrap_or_else(std::env::temp_dir)
-    }
 }
 
 /// Terminal UI behaviour.
@@ -102,7 +84,7 @@ mod defaults {
 
 impl Settings {
     /// Read `config.toml` under `home` if it exists, then apply `QUILL__`
-    /// variables, e.g. `QUILL__RESULTS__MAX_BYTES`.
+    /// variables, e.g. `QUILL__UI__PAGE_ROWS`.
     pub fn load(home: &QuillHome) -> Result<Self> {
         Figment::new()
             // A missing file reads as empty; the path is absolute, so no parent search.
@@ -122,19 +104,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let settings = Settings::load(&QuillHome::at(dir.path())).unwrap();
         assert_eq!(settings.ui.max_column_width, 40);
-        assert!(settings.results.max_bytes.is_none());
     }
 
     #[test]
     fn reads_config_toml() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("config.toml"),
-            "[results]\nmax_bytes = 1024\n[ui]\npage_rows = 50\n",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[ui]\npage_rows = 50\n").unwrap();
         let settings = Settings::load(&QuillHome::at(dir.path())).unwrap();
-        assert_eq!(settings.results.max_bytes.map(NonZeroU64::get), Some(1024));
         assert_eq!(settings.ui.page_rows.get(), 50);
     }
 }

@@ -82,17 +82,14 @@ impl QueryTab {
                 _ => format!("{connection} is still connecting"),
             });
         };
+        let Some(results) = connections.results(connection) else {
+            return report(format!("{connection} is still connecting"));
+        };
         let sql = self.editor.sql_to_run();
         if sql.trim().is_empty() {
             return report("nothing to run".into());
         }
-        let run = Run::start(
-            pool,
-            sql,
-            &ctx.shared.results_dir,
-            ctx.options().byte_limit,
-            ctx.shared.messages.clone(),
-        );
+        let run = Run::start(pool, results, sql, ctx.shared.messages.clone());
         self.stats.started(run.id());
         self.run = Some(run);
         self.results.running();
@@ -120,10 +117,10 @@ impl QueryTab {
                 if self.run.as_ref().is_some_and(|r| r.id() == run)
                     && let Some(finished) = self.run.take()
                 {
-                    let (client, sink) = finished.metrics();
+                    let (client, received) = finished.metrics();
                     let pool = ctx.connections().pool(connection);
                     let lookup = finished.query().zip(pool);
-                    self.stats.finished(run, client, sink, lookup.is_some());
+                    self.stats.finished(run, client, received, lookup.is_some());
                     if let Some((query, pool)) = lookup {
                         stats_task::spawn_server_metrics(
                             pool,
@@ -132,7 +129,7 @@ impl QueryTab {
                             ctx.shared.messages.clone(),
                         );
                     }
-                    self.results.finish(run, finished.dir(), result, ctx);
+                    self.results.finish(run, result, ctx);
                 }
             }
             RunMsg::Page { run, index, result } => return self.results.page(run, index, result),
@@ -153,13 +150,13 @@ impl QueryTab {
 
     /// Run progress, shown on the palette line.
     pub fn status(&self) -> Option<Line<'_>> {
-        let (sink, elapsed) = self.run.as_ref()?.progress();
+        let (received, elapsed) = self.run.as_ref()?.progress();
         Some(Line::from(vec![
             Span::styled("running ", theme::PENDING),
             Span::raw(format!(
                 "{} rows · {} · {}",
-                format::count(sink.rows_written),
-                format::bytes(sink.bytes_written),
+                format::count(received.rows),
+                format::bytes(received.bytes),
                 format::duration(elapsed),
             )),
             Span::styled("  esc cancel", theme::DIM),
@@ -388,22 +385,19 @@ mod tests {
 
     #[tokio::test]
     async fn sync_keeps_a_running_tab() {
-        use quill_drivers::{
-            ConnectionPool, settings::SqliteSettings, sqlite::SqliteConnectionPool,
-        };
+        use quill_providers::{Connect, settings::SqliteSettings, sqlite::SqliteConnectionPool};
         let settings = SqliteSettings {
             path: ":memory:".into(),
+            busy_timeout_ms: 5000,
             params: Default::default(),
         };
         let pool = SqliteConnectionPool::connect(&settings).await.unwrap();
-        let results = tempfile::tempdir().unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut tabs = three();
         tabs.active_mut().run = Some(Run::start(
             std::sync::Arc::new(pool),
+            datafusion::prelude::SessionContext::new(),
             "SELECT 1".into(),
-            results.path(),
-            None,
             tx,
         ));
         tabs.sync(&[name("c")], &name("c"), &store()).unwrap();

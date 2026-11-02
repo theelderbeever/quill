@@ -6,9 +6,10 @@ use std::{
     sync::Arc,
 };
 
+use datafusion::prelude::SessionContext;
 use indexmap::IndexMap;
 use quill_core::{error::Result, metadata::TableRef};
-use quill_drivers::{ConnectionPool, PoolFuture};
+use quill_providers::{ConnectionPool, PoolFuture};
 
 use crate::filter::Filter;
 
@@ -18,7 +19,7 @@ use crate::filter::Filter;
 /// ```
 /// use std::{path::Path, sync::Arc};
 /// use quill_core::error::Error;
-/// use quill_drivers::{ConnectionPool, PoolFuture};
+/// use quill_providers::{ConnectionPool, PoolFuture};
 /// use quill_tui::ConnectionSource;
 ///
 /// struct Offline;
@@ -117,10 +118,17 @@ pub enum Target {
     Many(Filter),
 }
 
+/// A connected session: the pool and the DataFusion context its results
+/// live in. Dropping it releases every result held for the connection.
+pub struct Session {
+    pub pool: Arc<dyn ConnectionPool>,
+    pub results: SessionContext,
+}
+
 pub enum ConnectionState {
     Idle,
     Connecting,
-    Connected(Arc<dyn ConnectionPool>),
+    Connected(Session),
     /// The error and its sources, formatted once when the attempt failed.
     Failed(String),
 }
@@ -146,7 +154,7 @@ struct Entry {
 /// ```
 /// # use std::{path::Path, sync::Arc};
 /// # use quill_core::error::Error;
-/// # use quill_drivers::{ConnectionPool, PoolFuture};
+/// # use quill_providers::{ConnectionPool, PoolFuture};
 /// # use quill_tui::{ConnectionGroup, ConnectionSource, Connections, Target};
 /// # struct Offline;
 /// # impl ConnectionSource for Offline {
@@ -260,7 +268,15 @@ impl Connections {
 
     pub(crate) fn pool(&self, id: &ConnectionId) -> Option<Arc<dyn ConnectionPool>> {
         match self.state(id)? {
-            ConnectionState::Connected(pool) => Some(pool.clone()),
+            ConnectionState::Connected(session) => Some(session.pool.clone()),
+            _ => None,
+        }
+    }
+
+    /// The context holding `id`'s results while it is connected.
+    pub(crate) fn results(&self, id: &ConnectionId) -> Option<SessionContext> {
+        match self.state(id)? {
+            ConnectionState::Connected(session) => Some(session.results.clone()),
             _ => None,
         }
     }
@@ -300,7 +316,10 @@ impl Connections {
             return;
         }
         entry.state = match result {
-            Ok(pool) => ConnectionState::Connected(pool),
+            Ok(pool) => ConnectionState::Connected(Session {
+                pool,
+                results: SessionContext::new(),
+            }),
             Err(error) => ConnectionState::Failed(error_chain(&error)),
         };
     }

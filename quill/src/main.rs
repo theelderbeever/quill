@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use anyhow::{anyhow, bail};
 use clap::{CommandFactory, FromArgMatches, Parser, parser::ValueSource};
 use quill::{connections::ConnectionFile, home::QuillHome, settings::Settings};
-use quill_io::feather::ByteLimit;
 use quill_tui::{Connections, Options};
 
 #[derive(Parser)]
@@ -51,8 +50,6 @@ async fn main() -> anyhow::Result<()> {
     let options = Options {
         redraw: settings.ui.redraw_interval(),
         autosave: settings.ui.autosave_delay(),
-        results_dir: settings.results.dir(),
-        byte_limit: settings.results.max_bytes.map(ByteLimit::from_non_zero),
         page_rows: settings.ui.page_rows,
         max_column_width: settings.ui.max_column_width,
     };

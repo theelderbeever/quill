@@ -1,13 +1,12 @@
-//! Fetch and format one page of a stored result through DataFusion.
+//! Fetch and format one page of a result through DataFusion.
 use std::ops::Range;
 
 use arrow::{
-    array::{Array, AsArray, BinaryArray, BinaryViewArray, FixedSizeBinaryArray, LargeBinaryArray},
-    datatypes::{DataType, Field, UInt64Type},
+    array::{Array, BinaryArray, BinaryViewArray, FixedSizeBinaryArray, LargeBinaryArray},
+    datatypes::{DataType, Field},
     util::display::{ArrayFormatter, FormatOptions},
 };
 use datafusion::prelude::SessionContext;
-use quill_io::feather::ROW_COLUMN;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::{RunId, RunMsg};
@@ -31,9 +30,6 @@ fn binary_bytes(column: &dyn Array, row: usize) -> Option<&[u8]> {
     };
     Some(bytes)
 }
-
-/// Name the stored result is registered under.
-pub const TABLE: &str = "r";
 
 /// Formatted cells for a run of consecutive rows.
 pub struct Page {
@@ -107,36 +103,37 @@ impl Cell {
     }
 }
 
+/// `ctx` must keep row order; see [`crate::result::ResultTable::ordered`].
 pub fn spawn(
     ctx: SessionContext,
+    table: String,
     run: RunId,
     index: u64,
     rows: Range<u64>,
     messages: UnboundedSender<Msg>,
 ) {
     tokio::spawn(async move {
-        let result = fetch(&ctx, rows).await;
+        let result = fetch(&ctx, &table, rows).await;
         let _ = messages.send(Msg::Run(RunMsg::Page { run, index, result }));
     });
 }
 
-async fn fetch(ctx: &SessionContext, rows: Range<u64>) -> anyhow::Result<Page> {
+async fn fetch(ctx: &SessionContext, table: &str, rows: Range<u64>) -> anyhow::Result<Page> {
     let sql = format!(
-        "SELECT * FROM {TABLE} WHERE {ROW_COLUMN} >= {} AND {ROW_COLUMN} < {}",
-        rows.start, rows.end
+        "SELECT * FROM {table} LIMIT {} OFFSET {}",
+        rows.end - rows.start,
+        rows.start
     );
     let batches = ctx.sql(&sql).await?.collect().await?;
     let options = FormatOptions::default().with_null("NULL");
     let mut page = Vec::new();
+    let mut row = rows.start;
     for batch in &batches {
         let schema = batch.schema();
-        let row_index = schema.index_of(ROW_COLUMN)?;
-        let numbers = batch.column(row_index).as_primitive::<UInt64Type>();
         let formatters = batch
             .columns()
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != row_index)
             .map(|(index, column)| {
                 ArrayFormatter::try_new(column.as_ref(), &options).map(|formatter| {
                     (
@@ -149,7 +146,7 @@ async fn fetch(ctx: &SessionContext, rows: Range<u64>) -> anyhow::Result<Page> {
             .collect::<Result<Vec<_>, _>>()?;
         for i in 0..batch.num_rows() {
             page.push(PageRow {
-                row: numbers.value(i),
+                row,
                 cells: formatters
                     .iter()
                     .map(|(column, kind, formatter)| {
@@ -157,9 +154,9 @@ async fn fetch(ctx: &SessionContext, rows: Range<u64>) -> anyhow::Result<Page> {
                     })
                     .collect(),
             });
+            row += 1;
         }
     }
-    page.sort_by_key(|r| r.row);
     Ok(Page { rows: page })
 }
 
@@ -169,11 +166,7 @@ mod tests {
 
     #[tokio::test]
     async fn uuid_metadata_survives_paging_and_formats_only_tagged_values() {
-        use arrow::{
-            array::{FixedSizeBinaryBuilder, UInt64Array},
-            datatypes::Schema,
-            record_batch::RecordBatch,
-        };
+        use arrow::{array::FixedSizeBinaryBuilder, datatypes::Schema, record_batch::RecordBatch};
         use std::sync::Arc;
         let uuid = uuid::Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").unwrap();
         let mut builder = FixedSizeBinaryBuilder::new(16);
@@ -191,20 +184,11 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![
             field,
             Field::new("bytes", DataType::FixedSizeBinary(16), true),
-            Field::new(ROW_COLUMN, DataType::UInt64, false),
         ]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                array.clone(),
-                array,
-                Arc::new(UInt64Array::from(vec![0, 1, 2])),
-            ],
-        )
-        .unwrap();
+        let batch = RecordBatch::try_new(schema, vec![array.clone(), array]).unwrap();
         let ctx = SessionContext::new();
-        ctx.register_batch(TABLE, batch).unwrap();
-        let page = fetch(&ctx, 0..3).await.unwrap();
+        ctx.register_batch("r", batch).unwrap();
+        let page = fetch(&ctx, "r", 0..3).await.unwrap();
         assert_eq!(page.rows[0].cells[0], Cell::Text(uuid.to_string()));
         assert!(matches!(page.rows[0].cells[1], Cell::Binary(_)));
         assert_eq!(page.rows[1].cells[0], Cell::Text("NULL".into()));

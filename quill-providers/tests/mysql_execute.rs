@@ -1,0 +1,42 @@
+//! Execution integration tests for mysql.
+#[path = "support/execution.rs"]
+mod execution;
+
+use execution::{TestResult, failures, metrics, nulls, rows, tls};
+use quill_core::query::*;
+use quill_providers::{Connect, mysql::*};
+
+#[tokio::test]
+#[ignore = "requires Docker Compose MySQL"]
+async fn mysql_execution() -> TestResult {
+    let pool = MysqlConnectionPool::connect(&MysqlSettings {
+        host: "localhost".into(),
+        port: 3306,
+        database: "quilt_test".into(),
+        user: "quill".into(),
+        password: Some("password".into()),
+        tls: tls(),
+        params: Default::default(),
+    })
+    .await?;
+    let request = QueryRequest::new(
+        "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<50) SELECT CAST(42 AS SIGNED) AS bound FROM n a CROSS JOIN n b",
+    );
+    rows(&pool, request, 2500).await?;
+    nulls(&pool, "SELECT CAST(NULL AS SIGNED)").await?;
+    let (_, measured) = metrics(&pool, QueryRequest::new("SELECT CAST(42 AS SIGNED)")).await?;
+    assert_eq!(measured.client.delivered_rows, 1);
+    assert_eq!(measured.server, None);
+    rows(
+        &pool,
+        QueryRequest::new("SELECT CAST(42 AS SIGNED) WHERE false"),
+        0,
+    )
+    .await?;
+    failures(
+        &pool,
+        "SELECT missing_execution_column",
+        "SELECT CAST(42 AS SIGNED)",
+    )
+    .await
+}

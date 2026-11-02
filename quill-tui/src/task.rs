@@ -11,7 +11,8 @@ use std::sync::{
 };
 
 use quill_core::query::{ExecutionControl, QueryId, ServerMetrics};
-use quill_io::feather::StoredQuery;
+
+use crate::result::{Collected, ResultTable};
 
 /// Identifies one query run, so updates for a superseded run are dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -39,7 +40,7 @@ pub enum RunMsg {
     },
     Finished {
         run: RunId,
-        result: anyhow::Result<StoredQuery>,
+        result: anyhow::Result<Collected>,
     },
     Page {
         run: RunId,
@@ -56,11 +57,11 @@ pub enum RunMsg {
         run: RunId,
         result: quill_core::error::Result<Option<ServerMetrics>>,
     },
-    /// A sorted or filtered view of `base`, drained to disk.
+    /// A sorted or filtered view of `base`, collected in memory.
     Derived {
         base: RunId,
         view: RunId,
-        result: anyhow::Result<StoredQuery>,
+        result: anyhow::Result<ResultTable>,
     },
     Saved {
         path: std::path::PathBuf,
