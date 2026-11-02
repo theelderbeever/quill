@@ -52,6 +52,11 @@ Still outstanding:
 
 ## Postgres (`dtp-postgres`)
 
+- Fixed in fork commit `664d2e3`: `varchar[]` (`_varchar`) now maps to Arrow
+  `List<Utf8>` and decodes NULL arrays/elements. JSON and JSONB are supported as
+  text, including JSONB catalog inference under the default type policy. Verified
+  against Postgres 18 with empty results and multiple batches.
+
 - `numeric` beyond Decimal128 precision (e.g. `numeric(60,8)`, `numeric(77,0)`) fails with
   `ExceedsMaximumPossibleValue` instead of mapping to Decimal256 or exact `Utf8` with
   `quill.*` field metadata. Unconstrained `numeric` is likewise not annotated.
