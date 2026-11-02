@@ -339,16 +339,26 @@ impl Connections {
     }
 }
 
-/// An error and its sources joined by `: `.
+/// Lead with the underlying cause so a narrow status line shows the useful detail.
 pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
-    let mut message = error.to_string();
+    let mut causes = vec![error];
     let mut source = error.source();
     while let Some(cause) = source {
-        message.push_str(": ");
-        message.push_str(&cause.to_string());
+        causes.push(cause);
         source = cause.source();
     }
-    message
+    causes
+        .into_iter()
+        .rev()
+        .map(|cause| {
+            cause
+                .to_string()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 #[cfg(test)]
@@ -410,6 +420,19 @@ mod tests {
         *,
     };
     use quill_core::error::Error;
+
+    #[test]
+    fn error_details_lead_with_the_cause_on_one_line() {
+        let error = Error::DriverConnect {
+            connection: "postgres".into(),
+            source: anyhow::anyhow!("FATAL: SSL required")
+                .context("PostgreSQL connection failed.\ndb error"),
+        };
+        let message = error_chain(&error);
+        assert!(message.starts_with("FATAL: SSL required:"), "{message}");
+        assert!(!message.contains('\n'));
+        assert!(message.ends_with("driver connect failed for postgres"));
+    }
 
     #[test]
     fn connects_once_and_retries_after_failure() {
