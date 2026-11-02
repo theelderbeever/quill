@@ -1,9 +1,37 @@
-# Upstream gaps
+# Provider parity gaps
 
 Behavior lost moving from quill's native drivers to
 [datafusion-table-providers](https://github.com/datafusion-contrib/datafusion-table-providers)
 (`dtp`) and [datafusion-federation](https://github.com/datafusion-contrib/datafusion-federation).
-Resolve these in a fork to reach full parity.
+The list below records the original migration gaps. Current integration status follows.
+
+## Fork integration status
+
+The workspace patches `datafusion-table-providers` to
+[`theelderbeever/feat/quill-features`](https://github.com/theelderbeever/datafusion-table-providers/tree/feat/quill-features);
+`Cargo.lock` pins the revision. Quill uses its native executor, provider-neutral
+bind parameters, query IDs, and index discovery. Postgres and MySQL TLS identities
+map to `sslcert`/`sslkey`. SQLite `databases` config maps to configured attachments,
+and `kind = "scylla"` remains an alias for `cassandra`. Arrow field metadata passes
+through query events without conversion.
+
+Still outstanding:
+
+- Multi-statement/multiple-result execution: the fork executor returns one Arrow stream.
+- Server metrics lookup and ClickHouse permission-denied classification. Query IDs
+  now reach native execution, but metrics retrieval is not wired.
+- Cassandra driver history: the fork accepts a history listener extension; Quill
+  does not yet collect it into client snapshots.
+- Full index fidelity: the fork reports names, keys, kinds, uniqueness and primary
+  status, but omits validity, ordering, included columns and predicates. Quill
+  reports unknown validity and retains keys as native expressions.
+- ClickHouse custom TLS and Cassandra TLS still use Quill-built clients/sessions.
+- MySQL TLS still uses `required` to preserve certificate/hostname verification.
+- Federation catalog refresh/lazy discovery and server metrics remain unresolved.
+- Provider conversion fixes are supplied by the fork; full parity still requires
+  live database verification of the cases below.
+
+## Original migration gaps
 
 ## Cross-provider (`dtp` common)
 

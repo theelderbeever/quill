@@ -52,6 +52,7 @@ async fn sqlite(
     path: &std::path::Path,
 ) -> Result<Arc<dyn ConnectionPool>, Box<dyn std::error::Error>> {
     let pool = SqliteConnectionPool::connect(&SqliteSettings {
+        databases: Vec::new(),
         path: path.into(),
         busy_timeout_ms: 5000,
         params: Default::default(),

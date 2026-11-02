@@ -55,6 +55,7 @@ pub enum ConnectionSettings {
     Mysql(MysqlSettings),
     Sqlite(SqliteSettings),
     Clickhouse(ClickhouseSettings),
+    #[serde(alias = "scylla")]
     Cassandra(CassandraSettings),
 }
 

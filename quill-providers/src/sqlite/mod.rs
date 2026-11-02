@@ -44,6 +44,13 @@ impl crate::Connect for SqliteConnectionPool {
             };
             let pool =
                 sqlitepool::SqliteConnectionPoolFactory::new(path, mode, settings.busy_timeout())
+                    .with_databases(Some(
+                        settings
+                            .databases
+                            .iter()
+                            .map(|path| Arc::from(path.as_str()))
+                            .collect(),
+                    ))
                     .build()
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?;
@@ -60,6 +67,12 @@ impl crate::Connect for SqliteConnectionPool {
 }
 
 impl Tables for SqliteTableFactory {
+    fn capabilities(&self) -> crate::Capabilities {
+        crate::Capabilities {
+            named_parameters: true,
+            positional_parameters: true,
+        }
+    }
     fn table(&self, table: TableReference) -> PoolFuture<'_, Arc<dyn TableProvider>> {
         Box::pin(async move { factory_table(self.table_provider(table).await) })
     }

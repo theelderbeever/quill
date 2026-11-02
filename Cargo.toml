@@ -66,6 +66,12 @@ unwrap_used = "warn"
 unsafe_code = "forbid"
 
 [patch.crates-io]
+# Quill provider parity fixes; keep all consumers on the same fork.
+datafusion-table-providers = {
+  git = "https://github.com/theelderbeever/datafusion-table-providers.git",
+  branch = "feat/quill-features"
+}
+
 # Adds `register_language` for SQL; drop once released upstream.
 ratatui-code-editor = {
   git = "https://github.com/theelderbeever/ratatui-code-editor.git",

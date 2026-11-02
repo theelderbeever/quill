@@ -1,18 +1,18 @@
 //! One [`ConnectionPool`] over any `datafusion-table-providers` pool.
 use std::sync::Arc;
 
-use datafusion::{
-    catalog::TableProvider, common::TableReference, execution::SendableRecordBatchStream,
-};
+use datafusion::{catalog::TableProvider, common::TableReference, scalar::ScalarValue};
 use datafusion_table_providers::sql::db_connection_pool::{
     DbConnectionPool,
     dbconnection::{self, DbConnection},
+    indexes::IndexDiscovery,
+    query::{NativeQueryExecutor, QueryOptions, QueryParams},
 };
 use futures::TryStreamExt;
 use quill_core::{
     error::{Error, Result},
     metadata::{CatalogRef, ColumnMetadata, SchemaRef, TableMetadata, TableRef},
-    query::{QueryEvent, QueryExecution, QueryRequest},
+    query::{ParameterValue, QueryEvent, QueryExecution, QueryId, QueryRequest},
 };
 
 use crate::{ConnectionPool, PoolFuture};
@@ -26,6 +26,7 @@ pub type FactoryError = Box<dyn std::error::Error + Send + Sync>;
 /// Builds federation-ready DataFusion tables over an upstream pool. Each
 /// provider's table factory implements it.
 pub trait Tables: Send + Sync {
+    fn capabilities(&self) -> crate::Capabilities;
     fn table(&self, table: TableReference) -> PoolFuture<'_, Arc<dyn TableProvider>>;
 }
 
@@ -44,16 +45,19 @@ pub(crate) fn factory_table(
 pub struct ProviderPool<T: 'static, P: 'static> {
     pool: UpstreamPool<T, P>,
     tables: Arc<dyn Tables>,
+    executor: Arc<dyn NativeQueryExecutor>,
+    indexes: Arc<dyn IndexDiscovery>,
     catalog: CatalogRef,
 }
 
 impl<T: 'static, P: 'static> ProviderPool<T, P> {
-    pub fn new(
-        pool: UpstreamPool<T, P>,
-        tables: Arc<dyn Tables>,
-        catalog: impl Into<String>,
-    ) -> Self {
+    pub fn new<U>(pool: Arc<U>, tables: Arc<dyn Tables>, catalog: impl Into<String>) -> Self
+    where
+        U: DbConnectionPool<T, P> + NativeQueryExecutor + IndexDiscovery + Send + Sync + 'static,
+    {
         Self {
+            executor: pool.clone(),
+            indexes: pool.clone(),
             pool,
             tables,
             catalog: CatalogRef {
@@ -99,24 +103,6 @@ impl<T: 'static, P: 'static> ProviderPool<T, P> {
     }
 }
 
-/// Providers await the first rows before returning a stream, so this runs
-/// inside the execution task where cancellation can reach it.
-/// Boxed so the future's `Send` bound is fixed to `'static`.
-fn stream<T: 'static, P: 'static>(
-    pool: UpstreamPool<T, P>,
-    sql: String,
-) -> PoolFuture<'static, SendableRecordBatchStream> {
-    Box::pin(async move {
-        let conn = pool
-            .connect()
-            .await
-            .map_err(|e| Error::DriverExecute(anyhow::anyhow!(e)))?;
-        dbconnection::query_arrow(conn, sql, None)
-            .await
-            .map_err(|e| Error::QueryExecution(Box::new(e)))
-    })
-}
-
 fn driver(error: dbconnection::Error) -> Error {
     Error::DriverExecute(error.into())
 }
@@ -125,40 +111,100 @@ impl<T: 'static, P: 'static> ConnectionPool for ProviderPool<T, P>
 where
     Self: Send + Sync,
 {
+    fn capabilities(&self) -> crate::Capabilities {
+        self.tables.capabilities()
+    }
+
     fn execute(&self, request: QueryRequest) -> PoolFuture<'_, QueryExecution> {
         Box::pin(async move {
-            if !request.bindings.named.is_empty() || !request.bindings.positional.is_empty() {
-                return Err(Error::UnsupportedOperation("query parameters"));
-            }
-            let pool = self.pool.clone();
-            Ok(crate::execution::start(move |sender, control| async move {
-                let mut stream = stream(pool, request.sql).await?;
-                // Commands return no columns; they report no result schema.
-                let schema = stream.schema();
-                if !schema.fields().is_empty() {
-                    let event = QueryEvent::Schema {
-                        result_set: 0,
-                        schema,
+            let executor = self.executor.clone();
+            let id = QueryId::new();
+            Ok(crate::execution::start_with_id(
+                id,
+                move |sender, control| async move {
+                    let params = QueryParams {
+                        positional: request
+                            .bindings
+                            .positional
+                            .into_iter()
+                            .map(parameter_scalar)
+                            .collect(),
+                        named: request
+                            .bindings
+                            .named
+                            .into_iter()
+                            .map(|(k, v)| (k, parameter_scalar(v)))
+                            .collect(),
                     };
-                    control.send(&sender, event).await?;
-                }
-                while let Some(batch) = stream
-                    .try_next()
-                    .await
-                    .map_err(|e| Error::QueryExecution(Box::new(e)))?
-                {
-                    let event = QueryEvent::Batch {
+                    let options = QueryOptions::new().with_query_id(id.to_string());
+                    let mut stream = executor
+                        .query(&request.sql, &params, &options)
+                        .await
+                        .map_err(Error::QueryExecution)?;
+                    // Commands return no columns; they report no result schema.
+                    let schema = stream.schema();
+                    if !schema.fields().is_empty() {
+                        let event = QueryEvent::Schema {
+                            result_set: 0,
+                            schema,
+                        };
+                        control.send(&sender, event).await?;
+                    }
+                    while let Some(batch) = stream
+                        .try_next()
+                        .await
+                        .map_err(|e| Error::QueryExecution(Box::new(e)))?
+                    {
+                        let event = QueryEvent::Batch {
+                            result_set: 0,
+                            batch,
+                        };
+                        control.send(&sender, event).await?;
+                    }
+                    let done = QueryEvent::ResultSetComplete {
                         result_set: 0,
-                        batch,
+                        affected_rows: None,
                     };
-                    control.send(&sender, event).await?;
-                }
-                let done = QueryEvent::ResultSetComplete {
-                    result_set: 0,
-                    affected_rows: None,
-                };
-                control.send(&sender, done).await
-            }))
+                    control.send(&sender, done).await
+                },
+            ))
+        })
+    }
+
+    fn list_indexes<'a>(
+        &'a self,
+        table: &'a TableRef,
+    ) -> PoolFuture<'a, Vec<quill_core::metadata::IndexMetadata>> {
+        Box::pin(async move {
+            use quill_core::metadata::{IndexKey, IndexKeySource, IndexMetadata};
+            let reference =
+                TableReference::partial(table.schema.name.as_str(), table.name.as_str());
+            let indexes = self
+                .indexes
+                .indexes(&reference)
+                .await
+                .map_err(Error::QueryExecution)?;
+            Ok(indexes
+                .into_iter()
+                .map(|index| IndexMetadata {
+                    name: index.name,
+                    access_method: index.kind.unwrap_or_default(),
+                    unique: index.unique,
+                    primary: index.primary,
+                    valid: None,
+                    keys: index
+                        .columns
+                        .into_iter()
+                        .map(|column| IndexKey {
+                            definition: column.clone(),
+                            source: IndexKeySource::Expression(column),
+                            ordering: None,
+                        })
+                        .collect(),
+                    included_columns: Vec::new(),
+                    predicate: None,
+                })
+                .collect())
         })
     }
 
@@ -229,5 +275,35 @@ where
                 columns,
             })
         })
+    }
+}
+
+fn parameter_scalar(value: ParameterValue) -> ScalarValue {
+    match value {
+        ParameterValue::Null => ScalarValue::Null,
+        ParameterValue::Boolean(v) => ScalarValue::Boolean(Some(v)),
+        ParameterValue::Int64(v) => ScalarValue::Int64(Some(v)),
+        ParameterValue::UInt64(v) => ScalarValue::UInt64(Some(v)),
+        ParameterValue::Float64(v) => ScalarValue::Float64(Some(v)),
+        ParameterValue::Text(v) => ScalarValue::Utf8(Some(v)),
+        ParameterValue::Binary(v) => ScalarValue::Binary(Some(v)),
+        ParameterValue::Date(v) => ScalarValue::Date32(Some(
+            (v - chrono::DateTime::UNIX_EPOCH.date_naive()).num_days() as i32,
+        )),
+        ParameterValue::Time(v) => {
+            use chrono::Timelike;
+            ScalarValue::Time64Nanosecond(Some(
+                i64::from(v.num_seconds_from_midnight()) * 1_000_000_000
+                    + i64::from(v.nanosecond()),
+            ))
+        }
+        ParameterValue::Timestamp(v) => {
+            ScalarValue::TimestampMicrosecond(Some(v.and_utc().timestamp_micros()), None)
+        }
+        ParameterValue::TimestampWithTimezone(v) => ScalarValue::TimestampMicrosecond(
+            Some(v.timestamp_micros()),
+            Some(v.offset().to_string().into()),
+        ),
+        ParameterValue::Uuid(v) => ScalarValue::Utf8(Some(v.to_string())),
     }
 }

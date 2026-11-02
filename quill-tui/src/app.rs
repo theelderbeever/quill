@@ -610,6 +610,7 @@ mod tests {
         // Swap the offline attempt for a real in-memory SQLite pool.
         let lite = id(&app.shared.connections, "lite");
         let settings = SqliteSettings {
+            databases: Vec::new(),
             path: ":memory:".into(),
             busy_timeout_ms: 5000,
             params: Default::default(),
@@ -707,6 +708,7 @@ mod tests {
         let mut app = App::new(shared, start);
         let lite = id(&app.shared.connections, "lite");
         let settings = SqliteSettings {
+            databases: Vec::new(),
             path: ":memory:".into(),
             busy_timeout_ms: 5000,
             params: Default::default(),
@@ -766,6 +768,7 @@ mod tests {
         let mut app = App::new(shared, start);
 
         let settings = SqliteSettings {
+            databases: Vec::new(),
             path: ":memory:".into(),
             busy_timeout_ms: 5000,
             params: Default::default(),

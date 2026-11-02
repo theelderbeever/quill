@@ -80,7 +80,8 @@ pub struct IndexMetadata {
     pub access_method: String,
     pub unique: bool,
     pub primary: bool,
-    pub valid: bool,
+    /// Absent when the provider does not report index validity.
+    pub valid: Option<bool>,
     pub keys: Vec<IndexKey>,
     pub included_columns: Vec<String>,
     /// Native SQL expression for a partial index.

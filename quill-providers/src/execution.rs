@@ -51,6 +51,7 @@ impl Drop for TaskLifetime {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn start<F, Fut>(work: F) -> QueryExecution
 where
     F: FnOnce(mpsc::Sender<Result<QueryEvent>>, Arc<Control>) -> Fut + Send + 'static,

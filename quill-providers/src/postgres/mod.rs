@@ -35,8 +35,9 @@ impl PostgresSettings {
         match &self.tls {
             None => set("sslmode", "disable"),
             Some(tls) => {
-                if tls.identity.is_some() {
-                    return Err(Error::UnsupportedOperation("postgres client certificates"));
+                if let Some(identity) = &tls.identity {
+                    set("sslcert", &identity.cert.to_string_lossy());
+                    set("sslkey", &identity.key.to_string_lossy());
                 }
                 set("sslmode", "verify-full");
                 if let Some(ca) = &tls.ca_cert {
@@ -68,6 +69,12 @@ impl crate::Connect for PostgresConnectionPool {
 }
 
 impl Tables for PostgresTableFactory {
+    fn capabilities(&self) -> crate::Capabilities {
+        crate::Capabilities {
+            named_parameters: false,
+            positional_parameters: true,
+        }
+    }
     fn table(&self, table: TableReference) -> PoolFuture<'_, Arc<dyn TableProvider>> {
         Box::pin(async move { factory_table(self.table_provider(table).await) })
     }

@@ -1975,8 +1975,7 @@ dependencies = [
 [[package]]
 name = "datafusion-table-providers"
 version = "0.15.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2080857b741174bed57099f5fe25583a02d449b2a3ad5f79934e784167ff280"
+source = "git+https://github.com/theelderbeever/datafusion-table-providers.git?branch=feat%2Fquill-features#5f1a76cfd48ec1d99e8421e198d37a3fb78af480"
 dependencies = [
  "arrow",
  "datafusion",
@@ -1992,8 +1991,7 @@ dependencies = [
 [[package]]
 name = "datafusion-table-providers-cassandra"
 version = "0.15.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7e8e89c15463d88aecf1f551e109939004303ea2bcae116bbefc5b51ca5fabe"
+source = "git+https://github.com/theelderbeever/datafusion-table-providers.git?branch=feat%2Fquill-features#5f1a76cfd48ec1d99e8421e198d37a3fb78af480"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2012,13 +2010,13 @@ dependencies = [
 [[package]]
 name = "datafusion-table-providers-clickhouse"
 version = "0.15.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "efc4dbddf39dd26f39334e2c4b4d27e190617841430b5bf7be4c79f8e829f20d"
+source = "git+https://github.com/theelderbeever/datafusion-table-providers.git?branch=feat%2Fquill-features#5f1a76cfd48ec1d99e8421e198d37a3fb78af480"
 dependencies = [
  "arrow",
  "arrow-ipc",
  "async-stream",
  "async-trait",
+ "chrono",
  "clickhouse",
  "datafusion",
  "datafusion-federation",
@@ -2034,8 +2032,7 @@ dependencies = [
 [[package]]
 name = "datafusion-table-providers-common"
 version = "0.15.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cc9959ac78b3a19eb5d2767231eed33b5ced641cc2339d9f091d169a174d600"
+source = "git+https://github.com/theelderbeever/datafusion-table-providers.git?branch=feat%2Fquill-features#5f1a76cfd48ec1d99e8421e198d37a3fb78af480"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2062,8 +2059,7 @@ dependencies = [
 [[package]]
 name = "datafusion-table-providers-mysql"
 version = "0.15.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a51a98be62080b6fa33f0fcaf5cbd06af042b18d5214686f2af03031cb363c10"
+source = "git+https://github.com/theelderbeever/datafusion-table-providers.git?branch=feat%2Fquill-features#5f1a76cfd48ec1d99e8421e198d37a3fb78af480"
 dependencies = [
  "arrow",
  "async-stream",
@@ -2076,6 +2072,7 @@ dependencies = [
  "futures",
  "mysql_async",
  "num-bigint 0.4.8",
+ "openssl",
  "sea-query",
  "secrecy",
  "snafu",
@@ -2086,8 +2083,7 @@ dependencies = [
 [[package]]
 name = "datafusion-table-providers-postgres"
 version = "0.15.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f122e3c5780c6aaa921cf75e5dffa803b6b5f370c05d1213344a35c986453238"
+source = "git+https://github.com/theelderbeever/datafusion-table-providers.git?branch=feat%2Fquill-features#5f1a76cfd48ec1d99e8421e198d37a3fb78af480"
 dependencies = [
  "arrow",
  "arrow-json",
@@ -2098,6 +2094,7 @@ dependencies = [
  "bb8-postgres",
  "bigdecimal",
  "byteorder",
+ "bytes",
  "chrono",
  "datafusion",
  "datafusion-federation",
@@ -2123,8 +2120,7 @@ dependencies = [
 [[package]]
 name = "datafusion-table-providers-sqlite"
 version = "0.15.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c19a87047a82d604a0f8c8696fd34c5ff51309915bbe85a5e1ae0df24407375"
+source = "git+https://github.com/theelderbeever/datafusion-table-providers.git?branch=feat%2Fquill-features#5f1a76cfd48ec1d99e8421e198d37a3fb78af480"
 dependencies = [
  "arrow",
  "arrow-schema",
@@ -4557,6 +4553,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "async-trait",
+ "chrono",
  "clickhouse",
  "datafusion",
  "datafusion-federation",

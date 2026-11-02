@@ -110,6 +110,12 @@ impl crate::Connect for ClickhouseConnectionPool {
 }
 
 impl Tables for ClickHouseTableFactory {
+    fn capabilities(&self) -> crate::Capabilities {
+        crate::Capabilities {
+            named_parameters: true,
+            positional_parameters: true,
+        }
+    }
     fn table(&self, table: TableReference) -> PoolFuture<'_, Arc<dyn TableProvider>> {
         Box::pin(async move { factory_table(self.table_provider(table, None).await) })
     }
