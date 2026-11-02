@@ -20,3 +20,7 @@ stop-docker:
 # Regenerate the fake Postgres seed data; applied when the pg container is recreated.
 seed rows='10000':
     sh docker/postgres/generate.sh {{ rows }}
+
+# Populate native database types and CSV/JSON/Parquet objects in RustFS (requires uv).
+seed-types:
+    sh docker/types/populate.sh

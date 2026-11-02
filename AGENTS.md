@@ -33,3 +33,18 @@ Crate boundaries should be based on domain as well as compilation boundaries.
 ## Development Scripts
 
 - Shell scripts for development work should be simple and direct. They do not need to handle every edgecase under the sun.
+
+## Dependency forks
+
+- `forks/datafusion-table-providers` and `forks/datafusion-federation` are Git submodules
+  and the canonical Cargo dependencies, selected through root path patches. Edit these
+  checkouts instead of sibling clones or Cargo's Git cache.
+- After cloning or switching Quill revisions, run `git submodule update --init --recursive`.
+  This checks out the pinned commits and normally leaves detached HEADs. Before editing,
+  select or create a named branch containing the pinned commit; do not reset existing work.
+- Run fork tests from the fork directory and integration checks from the Quill root.
+  Use `cargo tree` to confirm all enabled provider crates and federation resolve under `forks/`.
+- Commit and push fork changes first, then stage the submodule pointers and commit them
+  with Quill's corresponding changes. A fresh clone must be able to fetch every pinned commit.
+- Each repository has its own index and working tree. Check status inside both submodules
+  and Quill before committing; never overwrite unrelated edits.

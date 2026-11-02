@@ -6,6 +6,8 @@ members = [
   "quill-tui",
 ]
 
+exclude = ["forks/datafusion-federation", "forks/datafusion-table-providers"]
+
 resolver = "2"
 
 [workspace.package]
@@ -66,10 +68,28 @@ unwrap_used = "warn"
 unsafe_code = "forbid"
 
 [patch.crates-io]
-# Quill provider parity fixes; keep all consumers on the same fork.
-datafusion-table-providers = {
-  git = "https://github.com/theelderbeever/datafusion-table-providers.git",
-  branch = "feat/quill-features"
+datafusion-federation = {
+  path = "forks/datafusion-federation/datafusion-federation"
+}
+# Fork submodule commits pin the canonical provider implementations.
+datafusion-table-providers = { path = "forks/datafusion-table-providers/core" }
+datafusion-table-providers-cassandra = {
+  path = "forks/datafusion-table-providers/crates/cassandra"
+}
+datafusion-table-providers-clickhouse = {
+  path = "forks/datafusion-table-providers/crates/clickhouse"
+}
+datafusion-table-providers-common = {
+  path = "forks/datafusion-table-providers/crates/common"
+}
+datafusion-table-providers-mysql = {
+  path = "forks/datafusion-table-providers/crates/mysql"
+}
+datafusion-table-providers-postgres = {
+  path = "forks/datafusion-table-providers/crates/postgres"
+}
+datafusion-table-providers-sqlite = {
+  path = "forks/datafusion-table-providers/crates/sqlite"
 }
 
 # Adds `register_language` for SQL; drop once released upstream.
@@ -86,6 +106,6 @@ debug = false
 
 [profile.release]
 strip = true
-lto = true
+# lto = true
 panic = "abort"
-codegen-units = 1
+# codegen-units = 1

@@ -3,6 +3,8 @@
 
 [connection.postgres]
 kind = "postgres"
+# The development Postgres container uses plaintext, including with the TLS override.
+sslmode = "disable"
 host = "localhost"
 port = 5432
 database = "quilt_test"
@@ -30,7 +32,7 @@ tls = { ca_cert = "docker/tls/certs/ca.pem" }
 kind = "cassandra"
 nodes = ["localhost:9042"]
 tls = { ca_cert = "docker/tls/certs/ca.pem" }
-# No authentication or keyspace is provisioned by Compose.
+keyspace = "type_coverage"
 
 [connection.sqlite]
 kind = "sqlite"
@@ -61,11 +63,17 @@ secret_access_key = "password"
 # RustFS uses our generated CA. The generic options API cannot load that CA
 # yet; this bypass is strictly for the local development fixture.
 options = { aws_allow_invalid_certificates = "true" }
-# Create the quill bucket and upload files before registering tables.
-tables = []
+tables = [
+  { name = "people_csv", format = "csv", path = "people_csv/", has_header = true },
+  { name = "people_json", format = "json", path = "people_json/" },
+  { name = "people_parquet", format = "parquet", path = "people_parquet/" },
+]
 
-[workspace.postgres_clickhouse]
+[workspace.federation]
 connections = [
   { conn = "postgres", alias = "pg" },
   { conn = "clickhouse", alias = "ch" },
+  { conn = "mysql", alias = "mysql" },
+  { conn = "scylla", alias = "scylla" },
+  { conn = "files", alias = "files" },
 ]

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use datafusion::{catalog::TableProvider, common::TableReference};
 use datafusion_table_providers::{
+    UnsupportedTypeAction,
     postgres::PostgresTableFactory,
     sql::db_connection_pool::{dbconnection::postgresconn::PostgresPooledConnection, postgrespool},
 };
@@ -58,7 +59,9 @@ impl crate::Connect for PostgresConnectionPool {
             .map_err(|source| Error::DriverConnect {
                 connection: "postgres".into(),
                 source: source.into(),
-            })?;
+            })?
+            // Keep supported projections available when native columns have no Arrow mapping.
+            .with_unsupported_type_action(UnsupportedTypeAction::Warn);
         let pool = Arc::new(pool);
         let tables = Arc::new(PostgresTableFactory::new(pool.clone()));
         Ok(Self::new(pool, tables, settings.database.clone()))

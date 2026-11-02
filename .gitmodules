@@ -1,0 +1,8 @@
+[submodule "forks/datafusion-table-providers"]
+	path = forks/datafusion-table-providers
+	url = https://github.com/theelderbeever/datafusion-table-providers.git
+	branch = feat/quill-features
+[submodule "forks/datafusion-federation"]
+	path = forks/datafusion-federation
+	url = https://github.com/theelderbeever/datafusion-federation.git
+	branch = feat/quill-features

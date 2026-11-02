@@ -181,3 +181,34 @@ async fn joins_postgres_with_mysql() -> TestResult {
     run(&*my, "DROP TABLE quill_fed_orders").await?;
     result
 }
+
+#[tokio::test]
+#[ignore = "requires Docker Compose PostgreSQL"]
+async fn postgres_projection_with_unsupported_columns() -> TestResult {
+    let settings: PostgresSettings = toml::from_str(
+        "host = 'localhost'\ndatabase = 'quilt_test'\nuser = 'quill'\npassword = 'password'\nsslmode = 'disable'",
+    )?;
+    let postgres = PostgresConnectionPool::connect(&settings).await?;
+    run(&postgres, "CREATE TABLE IF NOT EXISTS public.quill_unsupported_projection (id integer, unsupported timetz)").await?;
+    run(&postgres, "DELETE FROM public.quill_unsupported_projection").await?;
+    run(
+        &postgres,
+        "INSERT INTO public.quill_unsupported_projection VALUES (42, '12:34:56+00')",
+    )
+    .await?;
+    let pool = federate(
+        vec![Member {
+            name: "pg".into(),
+            pool: Arc::new(postgres),
+        }],
+        16,
+    )
+    .await?;
+    let result = pairs(
+        &pool,
+        "SELECT id, CAST(id AS VARCHAR) AS label FROM pg.public.quill_unsupported_projection",
+    )
+    .await?;
+    assert_eq!(result, [(42, "42".into())]);
+    Ok(())
+}

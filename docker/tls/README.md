@@ -12,8 +12,8 @@ Existing certificates are reused while valid for at least another day.
 
 Configure clients to trust `docker/tls/certs/ca.pem` and enable hostname
 verification. One shared server certificate covers localhost, 127.0.0.1, ::1, and all four
-Compose service names. The shared files use RustFS’s required names,
-`rustfs_cert.pem` and `rustfs_key.pem`. No client certificate is required.
+Compose service names. The generator adds `rustfs_cert.pem` and `rustfs_key.pem` symlinks to the
+shared `development_cert.pem` and `development_key.pem` files, as required by RustFS. No client certificate is required.
 
 | Service | TLS endpoint |
 | --- | --- |

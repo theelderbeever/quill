@@ -7,9 +7,9 @@ The list below records the original migration gaps. Current integration status f
 
 ## Fork integration status
 
-The workspace patches `datafusion-table-providers` to
-[`theelderbeever/feat/quill-features`](https://github.com/theelderbeever/datafusion-table-providers/tree/feat/quill-features);
-`Cargo.lock` pins the revision. Quill uses its native executor, provider-neutral
+The workspace patches providers and federation to the local Git submodules under
+`forks/`. Quill's submodule pointers pin their revisions; `Cargo.lock` records the
+local dependency graph. Quill uses its native executor, provider-neutral
 bind parameters, query IDs, and index discovery. Postgres and MySQL TLS identities
 map to `sslcert`/`sslkey`. SQLite `databases` config maps to configured attachments,
 and `kind = "scylla"` remains an alias for `cassandra`. Arrow field metadata passes
@@ -51,6 +51,11 @@ Still outstanding:
   require a projected schema up front.
 
 ## Postgres (`dtp-postgres`)
+
+- Quill uses the provider’s warn-and-omit policy for unmapped native columns
+  (for example `timetz`), so supported columns remain queryable in federation.
+  Omitted columns are unavailable to federated queries, including `SELECT *`;
+  native SQL still requires provider conversion support for selected values.
 
 - Fixed in fork commit `664d2e3`: `varchar[]` (`_varchar`) now maps to Arrow
   `List<Utf8>` and decodes NULL arrays/elements. JSON and JSONB are supported as
