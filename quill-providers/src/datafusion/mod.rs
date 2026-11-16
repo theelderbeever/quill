@@ -100,6 +100,12 @@ impl DatafusionConnectionPool {
 }
 
 impl ConnectionPool for DatafusionConnectionPool {
+    fn object_stores(
+        &self,
+    ) -> Option<Arc<dyn datafusion::execution::object_store::ObjectStoreRegistry>> {
+        Some(self.inner.runtime_env().object_store_registry.clone())
+    }
+
     fn execute(
         &self,
         request: quill_core::query::QueryRequest,

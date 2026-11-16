@@ -4,6 +4,7 @@ pub mod derive;
 pub mod page;
 pub mod run;
 pub mod stats;
+pub mod watch;
 
 use std::sync::{
     Arc,

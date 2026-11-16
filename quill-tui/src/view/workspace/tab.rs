@@ -70,6 +70,12 @@ impl QueryTab {
         Ok(())
     }
 
+    /// Pick up the saved text if another editor changed it. Returns false
+    /// when unsaved edits here were kept over it.
+    pub fn reload(&mut self, store: &QueryStore) -> anyhow::Result<bool> {
+        Ok(self.editor.reload(store.read(&self.query)?))
+    }
+
     pub fn start_run(&mut self, connection: &ConnectionId, ctx: &Context) -> KeyOutcome {
         let report = |message: String| KeyOutcome::Action(Action::Report(message));
         if self.run.is_some() {

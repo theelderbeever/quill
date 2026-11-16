@@ -23,6 +23,7 @@ use crate::{
     },
     widget::{
         header::{self, Header},
+        inspector::{self, Inspector, InspectorOutcome},
         palette::{self, Flash, Palette, PaletteEvent},
     },
 };
@@ -43,6 +44,8 @@ pub struct App {
     /// until their connection is disconnected.
     sessions: HashMap<ConnectionId, Box<Workspace>>,
     palette: Palette,
+    /// Errors, shown over everything until dismissed.
+    error: Option<Inspector>,
     dirty: bool,
     quit: bool,
 }
@@ -56,6 +59,7 @@ impl App {
             views: ViewStack::new(),
             sessions: HashMap::new(),
             palette: Palette::new(),
+            error: None,
             dirty: true,
             quit: false,
         };
@@ -134,13 +138,28 @@ impl App {
     }
 
     fn show(&mut self, flash: Flash) {
-        self.palette.flash(flash);
+        match flash {
+            Flash::Error(message) => match &mut self.error {
+                Some(error) => error.append(&message),
+                None => self.error = Some(Inspector::error(message)),
+            },
+            info => self.palette.flash(info),
+        }
         self.dirty = true;
     }
 
     /// Precedence: open palette, reserved keys, focused view, then fallbacks
     /// the view left unhandled.
     fn handle_key(&mut self, key: KeyEvent) {
+        let quit = key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL;
+        if let Some(error) = self.error.as_mut().filter(|_| !quit) {
+            match error.handle_key(key) {
+                InspectorOutcome::Open => {}
+                InspectorOutcome::Close => self.error = None,
+                InspectorOutcome::Copy(text) => self.copy(text),
+            }
+            return;
+        }
         if self.palette.is_open() {
             match self.palette.handle_key(key) {
                 PaletteEvent::None => {}
@@ -199,6 +218,14 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if let Some(error) = &self.error {
+            if matches!(mouse.kind, MouseEventKind::Down(_))
+                && !error.contains(mouse.column, mouse.row)
+            {
+                self.error = None;
+            }
+            return;
+        }
         let ctx = self.shared.context(true);
         if let KeyOutcome::Action(action) = self.views.top_mut().handle_mouse(mouse, &ctx) {
             self.apply(action);
@@ -368,10 +395,17 @@ impl App {
         let header = Header {
             connections: &self.shared.connections,
             view,
-            hints: [view.hints(), view_hints, GLOBAL_HINTS],
+            hints: if self.error.is_some() {
+                [inspector::HINTS, &[], &[]]
+            } else {
+                [view.hints(), view_hints, GLOBAL_HINTS]
+            },
         };
         frame.render_widget(header, header_area);
         self.palette.render(frame, palette_area, view.status());
+        if let Some(error) = &self.error {
+            error.render(frame, body);
+        }
     }
 }
 
@@ -460,7 +494,19 @@ mod tests {
         type_command(&mut app, "conn pg");
 
         type_command(&mut app, "conn nope");
-        assert!(screen(&mut app, 120).contains("no connection named `nope`"));
+        let shown = screen(&mut app, 120);
+        assert!(shown.contains(" error "));
+        assert!(shown.contains("no connection named `nope`"));
+        app.report("second".into());
+        assert!(screen(&mut app, 120).contains("second"));
+        // The dialog takes keys until it closes.
+        press(&mut app, KeyCode::Esc);
+        assert!(!screen(&mut app, 120).contains(" error "));
+        // Ctrl-C still quits past the dialog.
+        app.report("again".into());
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit());
+        app.quit = false;
 
         type_command(&mut app, "conn");
         type_command(&mut app, "q");

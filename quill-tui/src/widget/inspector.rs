@@ -1,12 +1,13 @@
-//! A popup with one cell's full value, wrapped, JSON pretty-printed.
+//! A scrollable popup with full text: a cell's value or an error.
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Rect},
+    style::Style,
     widgets::{Clear, Paragraph, Wrap},
 };
 
-use crate::widget::panel;
+use crate::widget::{panel, theme};
 
 pub const HINTS: &[crate::component::KeyHint] = &[
     crate::component::KeyHint::new("y", "copy"),
@@ -26,23 +27,44 @@ pub struct Inspector {
     text: String,
     scroll: u16,
     copied: bool,
+    style: Style,
     area: std::cell::Cell<Rect>,
 }
 
 impl Inspector {
-    pub fn new(column: &str, row: u64, value: &str) -> Self {
+    /// One cell's value, JSON pretty-printed.
+    pub fn cell(column: &str, row: u64, value: &str) -> Self {
         let trimmed = value.trim_start();
         let pretty = (trimmed.starts_with('{') || trimmed.starts_with('['))
             .then(|| serde_json::from_str::<serde_json::Value>(value).ok())
             .flatten()
             .and_then(|json| serde_json::to_string_pretty(&json).ok());
+        Self::new(
+            format!("{column} · row {row}"),
+            pretty.unwrap_or_else(|| value.to_owned()),
+            Style::new(),
+        )
+    }
+
+    pub fn error(message: String) -> Self {
+        Self::new("error".into(), message, theme::ERROR)
+    }
+
+    fn new(title: String, text: String, style: Style) -> Self {
         Self {
-            title: format!("{column} · row {row}"),
-            text: pretty.unwrap_or_else(|| value.to_owned()),
+            title,
+            text,
             scroll: 0,
             copied: false,
+            style,
             area: std::cell::Cell::new(Rect::default()),
         }
+    }
+
+    /// Follow with another message, keeping the earlier ones.
+    pub fn append(&mut self, text: &str) {
+        self.text.push_str("\n\n");
+        self.text.push_str(text);
     }
 
     pub fn contains(&self, column: u16, row: u16) -> bool {
@@ -81,6 +103,7 @@ impl Inspector {
             self.title.clone()
         };
         let paragraph = Paragraph::new(self.text.as_str())
+            .style(self.style)
             .wrap(Wrap { trim: false })
             .scroll((self.scroll, 0))
             .block(panel::block(&title, true));
@@ -96,10 +119,10 @@ mod tests {
     #[test]
     fn pretty_prints_json_only() {
         assert_eq!(
-            Inspector::new("c", 0, r#"{"a":1}"#).text,
+            Inspector::cell("c", 0, r#"{"a":1}"#).text,
             "{\n  \"a\": 1\n}"
         );
-        assert_eq!(Inspector::new("c", 0, "12").text, "12");
-        assert_eq!(Inspector::new("c", 0, "{not json").text, "{not json");
+        assert_eq!(Inspector::cell("c", 0, "12").text, "12");
+        assert_eq!(Inspector::cell("c", 0, "{not json").text, "{not json");
     }
 }

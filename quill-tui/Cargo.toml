@@ -12,6 +12,11 @@ crossterm.workspace = true
 datafusion.workspace = true
 futures.workspace = true
 indexmap.workspace = true
+notify = {
+  version = "8",
+  default-features = false,
+  features = ["macos_fsevent"]
+}
 quill-core.workspace = true
 quill-providers.workspace = true
 ratatui.workspace = true

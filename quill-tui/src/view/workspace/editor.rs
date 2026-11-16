@@ -130,6 +130,24 @@ impl Editor {
         (text != self.saved).then_some(text)
     }
 
+    /// Take `text` saved by someone else. Unsaved edits are kept instead;
+    /// returns false when that leaves the buffer differing from disk.
+    pub fn reload(&mut self, text: String) -> bool {
+        if text == self.saved {
+            return true;
+        }
+        if self.inner.get_content() != self.saved {
+            return false;
+        }
+        let cursor = self.inner.get_cursor();
+        self.inner.set_content(&text);
+        self.inner
+            .set_cursor(cursor.min(self.inner.code_ref().len()));
+        self.touched = None;
+        self.saved = text;
+        true
+    }
+
     pub fn mark_saved(&mut self, text: String) {
         self.saved = text;
     }

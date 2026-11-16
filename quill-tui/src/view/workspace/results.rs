@@ -2,7 +2,6 @@
 //! sorted, filtered and saved.
 mod columns;
 mod grid;
-mod inspector;
 mod page;
 
 use std::{path::Path, sync::Arc};
@@ -22,11 +21,14 @@ use crate::{
     format,
     result::{Collected, ResultTable, Truncation},
     task::{RunId, derive, page::Page, stats},
-    widget::{palette::Flash, panel, theme},
+    widget::{
+        inspector::{self, Inspector, InspectorOutcome},
+        palette::Flash,
+        panel, theme,
+    },
 };
 use columns::Widths;
 use grid::{Grid, GridOutcome};
-use inspector::{Inspector, InspectorOutcome};
 
 const GRID_HINTS: &[KeyHint] = &[
     KeyHint::new("enter", "inspect"),

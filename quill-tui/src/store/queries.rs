@@ -131,7 +131,7 @@ impl QueryStore {
         fs::rename(&temp, &path).with_context(|| format!("write {}", path.display()))
     }
 
-    fn ensure_dir(&self) -> anyhow::Result<()> {
+    pub fn ensure_dir(&self) -> anyhow::Result<()> {
         fs::create_dir_all(&self.dir).with_context(|| format!("create {}", self.dir.display()))
     }
 }

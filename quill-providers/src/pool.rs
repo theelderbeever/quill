@@ -137,6 +137,14 @@ pub trait ConnectionPool: Send + Sync {
         Box::pin(async { Err(Error::UnsupportedOperation("table provider")) })
     }
 
+    /// Object stores this pool's table providers read through. Any session
+    /// executing those providers must resolve the same stores.
+    fn object_stores(
+        &self,
+    ) -> Option<std::sync::Arc<dyn datafusion::execution::object_store::ObjectStoreRegistry>> {
+        None
+    }
+
     /// Describe a table without interpreting its names as SQL text.
     fn describe_table<'a>(&'a self, _table: &'a TableRef) -> PoolFuture<'a, TableMetadata> {
         Box::pin(async { Err(Error::UnsupportedOperation("describe table")) })

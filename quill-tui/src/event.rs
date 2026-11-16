@@ -12,7 +12,7 @@ use tokio::{
 
 use crate::{
     connection::ConnectionId,
-    task::{RunMsg, catalog::CatalogMsg},
+    task::{RunMsg, catalog::CatalogMsg, watch::QueriesChanged},
 };
 
 /// An update from a background task.
@@ -23,6 +23,7 @@ pub enum Msg {
     },
     Run(RunMsg),
     Catalog(CatalogMsg),
+    Queries(QueriesChanged),
 }
 
 pub enum Event {

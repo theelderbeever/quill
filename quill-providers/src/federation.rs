@@ -6,7 +6,11 @@ use async_trait::async_trait;
 use datafusion::{
     catalog::{CatalogProvider, SchemaProvider, TableProvider},
     error::DataFusionError,
-    execution::session_state::SessionStateBuilder,
+    execution::{
+        object_store::{DefaultObjectStoreRegistry, ObjectStoreRegistry},
+        runtime_env::RuntimeEnvBuilder,
+        session_state::SessionStateBuilder,
+    },
     prelude::{SessionConfig, SessionContext},
 };
 use datafusion_federation::{FederatedQueryPlanner, default_optimizer_rules};
@@ -49,9 +53,21 @@ pub async fn federate(
     members: Vec<Member>,
     retained_metrics: u64,
 ) -> Result<DatafusionConnectionPool> {
+    let stores = MemberStores {
+        members: members
+            .iter()
+            .filter_map(|m| m.pool.object_stores())
+            .collect(),
+        own: DefaultObjectStoreRegistry::new(),
+    };
+    let runtime = RuntimeEnvBuilder::new()
+        .with_object_store_registry(Arc::new(stores))
+        .build_arc()
+        .map_err(|e| quill_core::error::Error::DriverExecute(e.into()))?;
     let config = SessionConfig::new().with_create_default_catalog_and_schema(false);
     let state = SessionStateBuilder::new()
         .with_config(config)
+        .with_runtime_env(runtime)
         .with_default_features()
         .with_optimizer_rules(default_optimizer_rules())
         .with_query_planner(Arc::new(FederatedQueryPlanner::new()))
@@ -65,6 +81,35 @@ pub async fn federate(
         ctx,
         retained_metrics,
     ))
+}
+
+/// Members' object stores, so their file-backed tables can be scanned from
+/// the federated session. Should two members register the same URL, the
+/// first listed wins; stores registered on the session itself come last.
+#[derive(Debug)]
+struct MemberStores {
+    members: Vec<Arc<dyn ObjectStoreRegistry>>,
+    own: DefaultObjectStoreRegistry,
+}
+
+impl ObjectStoreRegistry for MemberStores {
+    fn register_store(
+        &self,
+        url: &url::Url,
+        store: Arc<dyn object_store::ObjectStore>,
+    ) -> Option<Arc<dyn object_store::ObjectStore>> {
+        self.own.register_store(url, store)
+    }
+
+    fn get_store(
+        &self,
+        url: &url::Url,
+    ) -> datafusion::error::Result<Arc<dyn object_store::ObjectStore>> {
+        self.members
+            .iter()
+            .find_map(|registry| registry.get_store(url).ok())
+            .map_or_else(|| self.own.get_store(url), Ok)
+    }
 }
 
 /// A member's schemas, flattened across its own catalogs. Should two of its

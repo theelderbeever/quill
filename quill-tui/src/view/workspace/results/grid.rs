@@ -10,10 +10,11 @@ use ratatui::{
     widgets::{Row, Table, TableState},
 };
 
+use crate::widget::inspector::Inspector;
+
 use super::{
     Direction,
     columns::{self, Widths},
-    inspector::Inspector,
     page::PageCache,
 };
 use crate::{
@@ -173,7 +174,7 @@ impl Grid {
             KeyCode::Enter => {
                 let cell = self.pages.row(self.cursor_row).and_then(|row| {
                     let value = row.cells.get(self.cursor_col)?;
-                    Some(Inspector::new(
+                    Some(Inspector::cell(
                         &self.columns[self.cursor_col],
                         row.row + 1,
                         value.as_str(),
