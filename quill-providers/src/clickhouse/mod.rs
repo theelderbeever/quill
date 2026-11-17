@@ -4,8 +4,9 @@ mod settings;
 mod tsv;
 pub use settings::ClickhouseSettings;
 
+use crate::settings::SettingsError;
 use quill_core::{
-    error::{Error, Result},
+    error::{BoxError, Error, Result},
     metadata::{
         CatalogRef, ColumnMetadata, IndexKey, IndexKeySource, IndexMetadata, SchemaRef,
         TableMetadata, TableRef,
@@ -73,22 +74,21 @@ async fn names(query: clickhouse::query::Query) -> Result<Vec<String>> {
 
 impl ClickhouseSettings {
     /// An HTTP client honoring a custom CA and client identity.
-    async fn client(&self) -> anyhow::Result<clickhouse::Client> {
-        anyhow::ensure!(
-            self.user.is_some() || self.password.is_none(),
-            "ClickHouse password requires a user"
-        );
+    async fn client(&self) -> Result<clickhouse::Client, BoxError> {
+        if self.user.is_none() && self.password.is_some() {
+            return Err(SettingsError::PasswordWithoutUser.into());
+        }
         let scheme = if self.tls.is_some() { "https" } else { "http" };
         let endpoint = url::Url::parse(&format!("{scheme}://{}", self.host))?;
-        anyhow::ensure!(
-            endpoint.host_str().is_some()
-                && endpoint.username().is_empty()
-                && endpoint.password().is_none()
-                && endpoint.path() == "/"
-                && endpoint.query().is_none()
-                && endpoint.fragment().is_none(),
-            "ClickHouse host must contain only a hostname and optional port"
-        );
+        if endpoint.host_str().is_none()
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.path() != "/"
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
+        {
+            return Err(SettingsError::InvalidHost(self.host.clone()).into());
+        }
         let mut client = clickhouse::Client::default();
         if let Some(tls) = &self.tls {
             let mut builder = native_tls::TlsConnector::builder();
@@ -143,7 +143,7 @@ impl crate::Connect for ClickhouseConnectionPool {
             let client = settings.client().await?;
             // Probing the query log also checks the connection.
             let query_log = QueryLog::probe(&client).await?;
-            anyhow::Ok(Self { client, query_log })
+            Ok::<_, BoxError>(Self { client, query_log })
         };
         connect.await.map_err(|source| Error::DriverConnect {
             connection: "clickhouse".into(),
@@ -319,11 +319,10 @@ impl ConnectionPool for ClickhouseConnectionPool {
                 .bind(&table.name);
             let rows = text_rows(query).await.map_err(driver)?;
             if rows.is_empty() {
-                return Err(Error::DriverExecute(anyhow::anyhow!(
-                    "table {}.{} not found",
-                    table.schema.name,
-                    table.name
-                )));
+                return Err(Error::TableNotFound {
+                    schema: table.schema.name.clone(),
+                    table: table.name.clone(),
+                });
             }
             Ok(TableMetadata {
                 table: table.clone(),

@@ -3865,7 +3865,6 @@ dependencies = [
 name = "quill-core"
 version = "0.1.0-alpha.0"
 dependencies = [
- "anyhow",
  "chrono",
  "futures",
  "pretty_assertions",
@@ -3882,7 +3881,6 @@ dependencies = [
 name = "quill-providers"
 version = "0.1.0-alpha.0"
 dependencies = [
- "anyhow",
  "arrow",
  "bigdecimal",
  "chrono",

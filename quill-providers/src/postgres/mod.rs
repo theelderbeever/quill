@@ -182,7 +182,10 @@ impl PostgresConnectionPool {
         .await
         .map_err(driver)?;
         if rows.is_empty() {
-            return Err(Error::DriverExecute(sqlx::Error::RowNotFound.into()));
+            return Err(Error::TableNotFound {
+                schema: table.schema.name.clone(),
+                table: table.name.clone(),
+            });
         }
         Ok(rows
             .into_iter()

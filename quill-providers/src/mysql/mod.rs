@@ -2,6 +2,8 @@
 mod settings;
 pub use settings::MysqlSettings;
 
+use crate::settings::SettingsError;
+use quill_core::error::BoxError;
 use std::sync::Arc;
 
 use quill_core::{
@@ -41,11 +43,10 @@ fn driver(error: sqlx::Error) -> Error {
 }
 
 impl MysqlSettings {
-    fn options(&self) -> anyhow::Result<MySqlConnectOptions> {
-        anyhow::ensure!(
-            self.params.is_empty(),
-            "MySQL parameters are not yet supported"
-        );
+    fn options(&self) -> Result<MySqlConnectOptions, SettingsError> {
+        if !self.params.is_empty() {
+            return Err(SettingsError::UnsupportedParams("MySQL"));
+        }
         let mut options = MySqlConnectOptions::new()
             .host(&self.host)
             .port(self.port)
@@ -77,7 +78,7 @@ impl crate::Connect for MysqlConnectionPool {
     async fn connect(settings: &Self::Settings) -> Result<Self> {
         let connect = async {
             let inner = MySqlPool::connect_with(settings.options()?).await?;
-            anyhow::Ok(Self { inner })
+            Ok::<_, BoxError>(Self { inner })
         };
         connect.await.map_err(|source| Error::DriverConnect {
             connection: "mysql".into(),
@@ -353,7 +354,10 @@ impl ConnectionPool for MysqlConnectionPool {
             .await
             .map_err(driver)?;
             if rows.is_empty() {
-                return Err(Error::DriverExecute(sqlx::Error::RowNotFound.into()));
+                return Err(Error::TableNotFound {
+                    schema: table.schema.name.clone(),
+                    table: table.name.clone(),
+                });
             }
             Ok(TableMetadata {
                 table: table.clone(),

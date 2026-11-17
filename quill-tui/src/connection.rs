@@ -412,7 +412,8 @@ mod tests {
         let error = Error::DriverConnect {
             connection: "postgres".into(),
             source: anyhow::anyhow!("FATAL: SSL required")
-                .context("PostgreSQL connection failed.\ndb error"),
+                .context("PostgreSQL connection failed.\ndb error")
+                .into(),
         };
         let message = error_chain(&error);
         assert!(message.starts_with("FATAL: SSL required:"), "{message}");

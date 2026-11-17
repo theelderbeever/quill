@@ -1,5 +1,7 @@
 mod metadata;
+use crate::settings::SettingsError;
 use metadata::ColumnField;
+use quill_core::error::BoxError;
 mod values;
 
 mod settings;
@@ -209,12 +211,15 @@ impl ConnectionPool for DatafusionConnectionPool {
                 .inner
                 .catalog(&table.schema.catalog.name)
                 .and_then(|c| c.schema(&table.schema.name))
-                .ok_or_else(|| Error::DriverExecute(anyhow::anyhow!("schema not found")))?;
+                .ok_or_else(|| Error::MissingMetadata("schema"))?;
             let provider = provider
                 .table(&table.name)
                 .await
                 .map_err(|e| Error::DriverExecute(e.into()))?
-                .ok_or_else(|| Error::DriverExecute(anyhow::anyhow!("table not found")))?;
+                .ok_or_else(|| Error::TableNotFound {
+                    schema: table.schema.name.clone(),
+                    table: table.name.clone(),
+                })?;
             Ok(TableMetadata {
                 table: table.clone(),
                 columns: provider
@@ -238,29 +243,25 @@ impl crate::Connect for DatafusionConnectionPool {
             for config in &settings.object_stores {
                 let (url, store) = config.build()?;
                 let authority = url[..url::Position::BeforePath].to_owned();
-                if url.scheme() != "file" {
-                    anyhow::ensure!(
-                        authorities.insert(authority),
-                        "duplicate object store authority"
-                    );
+                if url.scheme() != "file" && !authorities.insert(authority.clone()) {
+                    return Err(SettingsError::DuplicateObjectStore(authority).into());
                 }
                 inner.register_object_store(&url, store);
                 for table in &config.tables {
                     let path = url.join(&table.path)?;
-                    anyhow::ensure!(
-                        path.scheme() == url.scheme()
-                            && path.host_str() == url.host_str()
-                            && path.port() == url.port()
-                            && path.username().is_empty()
-                            && path.password().is_none()
-                            && path.query().is_none()
-                            && path.fragment().is_none(),
-                        "table path must belong to its parent object store"
-                    );
-                    anyhow::ensure!(
-                        !inner.table_exist(table.name.as_str())?,
-                        "duplicate table name"
-                    );
+                    if path.scheme() != url.scheme()
+                        || path.host_str() != url.host_str()
+                        || path.port() != url.port()
+                        || !path.username().is_empty()
+                        || path.password().is_some()
+                        || path.query().is_some()
+                        || path.fragment().is_some()
+                    {
+                        return Err(SettingsError::TableOutsideStore(table.path.clone()).into());
+                    }
+                    if inner.table_exist(table.name.as_str())? {
+                        return Err(SettingsError::DuplicateTable(table.name.to_string()).into());
+                    }
                     match &table.format {
                         FileFormat::Parquet => {
                             inner
@@ -292,7 +293,7 @@ impl crate::Connect for DatafusionConnectionPool {
                     }
                 }
             }
-            Ok::<_, anyhow::Error>(Self::from_context(inner, settings.retained_metrics))
+            Ok::<_, BoxError>(Self::from_context(inner, settings.retained_metrics))
         };
         connect.await.map_err(|source| Error::DriverConnect {
             connection: "datafusion".into(),
@@ -365,12 +366,12 @@ mod tests {
         let schema = schemas
             .iter()
             .find(|s| s.name == "public")
-            .ok_or_else(|| anyhow::anyhow!("missing schema"))?;
+            .ok_or("missing schema")?;
         let tables = shared.list_tables(schema).await?;
         let table = tables
             .iter()
             .find(|t| t.name == "csv_data")
-            .ok_or_else(|| anyhow::anyhow!("missing table"))?;
+            .ok_or("missing table")?;
         let metadata = shared.describe_table(table).await?;
         assert_eq!(metadata.columns[0].name, "id");
         assert!(matches!(

@@ -2,6 +2,8 @@
 mod settings;
 pub use settings::SqliteSettings;
 
+use crate::settings::SettingsError;
+use quill_core::error::BoxError;
 use std::{path::Path, str::FromStr, sync::Arc};
 
 use quill_core::{
@@ -53,14 +55,14 @@ fn identifier(name: &str) -> String {
 
 impl SqliteSettings {
     /// `ATTACH` statements for `databases`, each named after its file stem.
-    fn attachments(&self) -> anyhow::Result<Vec<String>> {
+    fn attachments(&self) -> Result<Vec<String>, SettingsError> {
         self.databases
             .iter()
             .map(|path| {
                 let stem = Path::new(path)
                     .file_stem()
                     .and_then(|s| s.to_str())
-                    .ok_or_else(|| anyhow::anyhow!("SQLite database `{path}` has no file name"))?;
+                    .ok_or_else(|| SettingsError::NoFileName(path.clone()))?;
                 Ok(format!(
                     "ATTACH DATABASE {} AS {}",
                     literal(path),
@@ -70,15 +72,11 @@ impl SqliteSettings {
             .collect()
     }
 
-    async fn pool(&self) -> anyhow::Result<SqlitePool> {
-        anyhow::ensure!(
-            self.params.is_empty(),
-            "SQLite parameters are not yet supported"
-        );
-        let path = self
-            .path
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("SQLite path must be valid UTF-8"))?;
+    async fn pool(&self) -> Result<SqlitePool, BoxError> {
+        if !self.params.is_empty() {
+            return Err(SettingsError::UnsupportedParams("SQLite").into());
+        }
+        let path = self.path.to_str().ok_or(SettingsError::NonUtf8Path)?;
         let memory = path == MEMORY;
         let options = if memory {
             SqliteConnectOptions::from_str("sqlite::memory:")?
@@ -303,7 +301,10 @@ impl ConnectionPool for SqliteConnectionPool {
             .await
             .map_err(driver)?;
             if rows.is_empty() {
-                return Err(Error::DriverExecute(sqlx::Error::RowNotFound.into()));
+                return Err(Error::TableNotFound {
+                    schema: table.schema.name.clone(),
+                    table: table.name.clone(),
+                });
             }
             Ok(TableMetadata {
                 table: table.clone(),

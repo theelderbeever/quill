@@ -2,6 +2,8 @@
 mod settings;
 pub use settings::CassandraSettings;
 
+use crate::settings::SettingsError;
+use quill_core::error::BoxError;
 use std::{collections::BTreeMap, sync::Arc};
 
 use futures::TryStreamExt;
@@ -44,11 +46,10 @@ fn query_error(error: impl std::error::Error + Send + Sync + 'static) -> Error {
 
 impl CassandraSettings {
     /// A session honoring TLS, authentication and datacenter preference.
-    async fn session(&self) -> anyhow::Result<Session> {
-        anyhow::ensure!(
-            self.params.is_empty(),
-            "Cassandra parameters are not yet supported"
-        );
+    async fn session(&self) -> Result<Session, BoxError> {
+        if !self.params.is_empty() {
+            return Err(SettingsError::UnsupportedParams("Cassandra").into());
+        }
         let mut builder = SessionBuilder::new().known_nodes(&self.nodes);
         if let Some(datacenter) = &self.datacenter {
             use scylla::{
@@ -66,7 +67,7 @@ impl CassandraSettings {
         match (&self.user, &self.password) {
             (Some(user), Some(password)) => builder = builder.user(user, password.expose_secret()),
             (None, None) => {}
-            _ => anyhow::bail!("Cassandra authentication requires both user and password"),
+            _ => return Err(SettingsError::IncompleteCredentials.into()),
         }
         if let Some(tls) = &self.tls {
             use openssl::ssl::{SslConnector, SslFiletype, SslMethod};
@@ -382,11 +383,10 @@ impl ConnectionPool for CassandraConnectionPool {
                 .await
                 .map_err(driver)?;
             if rows.is_empty() {
-                return Err(Error::DriverExecute(anyhow::anyhow!(
-                    "table {}.{} not found",
-                    table.schema.name,
-                    table.name
-                )));
+                return Err(Error::TableNotFound {
+                    schema: table.schema.name.clone(),
+                    table: table.name.clone(),
+                });
             }
             let rank = |kind: &str| match kind {
                 "partition_key" => 0,

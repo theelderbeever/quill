@@ -36,6 +36,29 @@ pub struct TlsIdentity {
 /// Drivers consume the keys they recognize and pass the rest through.
 pub type Params = BTreeMap<String, String>;
 
+/// A connection's settings cannot be used as written.
+#[derive(Debug, thiserror::Error)]
+pub enum SettingsError {
+    #[error("{0} connection parameters are not yet supported")]
+    UnsupportedParams(&'static str),
+    #[error("ClickHouse password requires a user")]
+    PasswordWithoutUser,
+    #[error("ClickHouse host `{0}` must contain only a hostname and optional port")]
+    InvalidHost(String),
+    #[error("Cassandra authentication requires both user and password")]
+    IncompleteCredentials,
+    #[error("SQLite database `{0}` has no file name")]
+    NoFileName(String),
+    #[error("SQLite path must be valid UTF-8")]
+    NonUtf8Path,
+    #[error("duplicate object store authority `{0}`")]
+    DuplicateObjectStore(String),
+    #[error("table path `{0}` must belong to its parent object store")]
+    TableOutsideStore(String),
+    #[error("duplicate table name `{0}`")]
+    DuplicateTable(String),
+}
+
 pub use crate::postgres::PostgresSettings;
 
 pub use crate::mysql::MysqlSettings;
