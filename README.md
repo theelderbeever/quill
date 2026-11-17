@@ -1,7 +1,7 @@
 # Quill
 
-A Rust-native, multi-database SQL editor. Connections are built on DataFusion table
-providers; workspaces federate several connections into one DataFusion session.
+A Rust-native, multi-database SQL editor. Each connection runs SQL natively on its
+database; DataFusion serves local files and object stores.
 
 ## Testing
 
@@ -34,15 +34,11 @@ ClickHouse, and Cassandra (the Compose Scylla service), including missing-table 
 CA in `docker/tls/certs/ca.pem` for the services configured with TLS. Postgres uses
 plaintext in the current Compose setup.
 
-Run every database test, including per-driver execution and a Postgres–MySQL
-federated join:
+Run every database test, including per-driver execution:
 
 ```sh
 QUILL_TEST_TLS=1 cargo test --no-fail-fast -p quill-providers -- --ignored
 ```
-
-A few execution tests stay ignored with an `upstream provider …` reason; they document
-gaps tracked in [`docs/gaps.md`](docs/gaps.md) and fail until those are fixed.
 
 ### Compose without TLS
 
@@ -95,23 +91,3 @@ ca_cert = "/path/to/ca.pem" # Optional; otherwise use system trust roots.
 
 The typed `sslmode` setting takes precedence over `params.sslmode`. Other providers
 retain their existing TLS defaults.
-
-### Working with dependency forks
-
-Clone Quill with `git clone --recurse-submodules https://github.com/theelderbeever/quill.git`, or initialize
-an existing checkout with:
-
-```sh
-git submodule update --init --recursive
-```
-
-The forks in `forks/` are canonical local Cargo dependencies. Their commits are pinned
-by Quill's submodule pointers; edits there are picked up by the next build without a
-Git dependency refresh. After switching Quill revisions, update the submodules again.
-The two forks remain independent Cargo workspaces. Run their tests from their own
-folders, and run Quill checks from the repository root. CI must initialize submodules
-before invoking Cargo.
-
-Before developing inside a submodule, select or create a named branch containing its
-pinned commit. Commit and push fork changes first, then commit the updated submodule
-pointers in Quill. See `AGENTS.md` for the cross-repository workflow.

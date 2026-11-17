@@ -23,18 +23,14 @@ use quill_providers::{
 use quill_tui::{ConnectionGroup, ConnectionSource, quote};
 use serde::Deserialize;
 
-use crate::{
-    home::QuillHome,
-    workspaces::{Members, ResolvedWorkspace, WorkspaceToml},
-};
+use crate::home::QuillHome;
 use quill_core::error::{Error, Result};
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConnectionsToml {
     #[serde(default)]
     connection: IndexMap<String, Connection>,
-    #[serde(default)]
-    workspace: IndexMap<String, WorkspaceToml>,
 }
 
 /// One `[connection.<name>]` table.
@@ -188,11 +184,10 @@ impl ConnectionSource for ResolvedConnection {
     }
 }
 
-/// Connections and workspaces read from one file.
+/// Connections read from one file.
 pub struct ConnectionFile {
     path: PathBuf,
     connections: IndexMap<String, Connection>,
-    workspaces: IndexMap<String, (Members, WorkspaceToml)>,
 }
 
 impl ConnectionFile {
@@ -205,24 +200,11 @@ impl ConnectionFile {
         };
         let parsed: ConnectionsToml =
             toml::from_str(&text).map_err(|e| Error::Config(format!("{}: {e}", path.display())))?;
-        let in_file =
-            |reason: &dyn std::fmt::Display| Error::Config(format!("{}: {reason}", path.display()));
-        let mut workspaces = IndexMap::new();
-        for (name, workspace) in parsed.workspace {
-            if parsed.connection.contains_key(&name) {
-                let reason = format!("workspace `{name}` shares its name with a connection");
-                return Err(in_file(&reason));
-            }
-            let members = Members::resolve(&name, &workspace.connections, &parsed.connection)
-                .map_err(|e| in_file(&e))?;
-            workspaces.insert(name, (members, workspace));
-        }
         let path = std::path::absolute(path)
             .map_err(|e| Error::Config(format!("{}: {e}", path.display())))?;
         Ok(Some(Self {
             path,
             connections: parsed.connection,
-            workspaces,
         }))
     }
 
@@ -232,8 +214,7 @@ impl ConnectionFile {
 
     /// Resolve query directories. An explicit `queries` is relative to the
     /// file; otherwise home connections use `QUILL_HOME/queries/<name>` and
-    /// others `<file dir>/.quill/queries/<name>`. Workspaces follow the same
-    /// rule and are listed after the connections.
+    /// others `<file dir>/.quill/queries/<name>`.
     pub fn into_group(self, home: &QuillHome) -> ConnectionGroup {
         let dir = self
             .path
@@ -244,31 +225,20 @@ impl ConnectionFile {
         } else {
             dir.join(".quill/queries")
         };
-        let connections = self.connections.into_iter().map(|(name, connection)| {
-            let query_dir = connection
-                .queries
-                .map_or_else(|| default_root.join(&name), |q| dir.join(q));
-            let source: Box<dyn ConnectionSource> = Box::new(ResolvedConnection {
-                settings: connection.driver,
-                query_dir,
-            });
-            (name, source)
-        });
-        let workspaces = self
-            .workspaces
+        let connections = self
+            .connections
             .into_iter()
-            .map(|(name, (members, workspace))| {
-                let query_dir = workspace
+            .map(|(name, connection)| {
+                let query_dir = connection
                     .queries
                     .map_or_else(|| default_root.join(&name), |q| dir.join(q));
-                let source: Box<dyn ConnectionSource> = Box::new(ResolvedWorkspace {
-                    members,
+                let source: Box<dyn ConnectionSource> = Box::new(ResolvedConnection {
+                    settings: connection.driver,
                     query_dir,
-                    retained_metrics: workspace.retained_metrics,
                 });
                 (name, source)
-            });
-        let connections = connections.chain(workspaces).collect();
+            })
+            .collect();
         ConnectionGroup {
             label: display_path(&self.path),
             connections,
@@ -374,110 +344,29 @@ mod tests {
     }
 
     #[test]
-    fn workspaces_follow_connections_and_name_their_members() {
-        let root = tempfile::tempdir().unwrap();
-        let home = QuillHome::at(root.path().join("home"));
-        let path = root.path().join(".quill.toml");
+    fn rejects_unknown_top_level_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.toml");
         std::fs::write(
             &path,
             "[connection.a]\nkind = \"sqlite\"\npath = \":memory:\"\n\
-             [connection.b]\nkind = \"sqlite\"\npath = \":memory:\"\n\
-             [workspace.both]\nconnections = [\"a\", { conn = \"b\", alias = \"bee\" }]\n",
+             [workspace.w]\nconnections = [\"a\"]\n",
         )
         .unwrap();
-        let group = group(&home, &path);
-        let (name, source) = &group.connections[2];
-        assert_eq!(name, "both");
-        assert_eq!(source.kind(), "workspace");
-        assert_eq!(source.host().as_deref(), Some("a +1"));
-        let Some(Ok(file)) = ConnectionFile::load(&path).transpose() else {
-            panic!("loads");
+        let Err(error) = ConnectionFile::load(&path) else {
+            panic!("`workspace` must be rejected");
         };
-        assert_eq!(
-            file.workspaces["both"].0.names().collect::<Vec<_>>(),
-            ["a", "bee"]
+        assert!(
+            error.to_string().contains("unknown field `workspace`"),
+            "{error}"
         );
-        assert_eq!(source.query_dir(), root.path().join(".quill/queries/both"));
-    }
-
-    #[tokio::test]
-    async fn workspace_connects_its_members_and_joins_across_them() {
-        use futures::StreamExt;
-        use quill_core::query::{QueryEvent, QueryRequest};
-
-        let dir = tempfile::tempdir().unwrap();
-        let run = |pool: Arc<dyn ConnectionPool>, sql: &'static str| async move {
-            let mut execution = pool.execute(QueryRequest::new(sql)).await.unwrap();
-            let mut rows = 0;
-            while let Some(event) = execution.events.next().await {
-                if let QueryEvent::Batch { batch, .. } = event.unwrap() {
-                    rows += batch.num_rows();
-                }
-            }
-            rows
-        };
-        let path = dir.path().join("connections.toml");
-        let db = |name: &str| dir.path().join(name).display().to_string();
-        std::fs::write(
-            &path,
-            format!(
-                "[connection.a]\nkind = \"sqlite\"\npath = \"{}\"\n\
-                 [connection.b]\nkind = \"sqlite\"\npath = \"{}\"\n\
-                 [workspace.both]\nconnections = [\"a\", {{ conn = \"b\", alias = \"bee\" }}]\n",
-                db("a.db"),
-                db("b.db")
-            ),
-        )
-        .unwrap();
-        let home = QuillHome::at(dir.path().join("home"));
-        let group = group(&home, &path);
-        let a = group.connections[0].1.connect().await.unwrap();
-        let b = group.connections[1].1.connect().await.unwrap();
-        run(a.clone(), "CREATE TABLE t (id INTEGER)").await;
-        run(a, "INSERT INTO t VALUES (1), (2)").await;
-        run(b.clone(), "CREATE TABLE u (id INTEGER)").await;
-        run(b, "INSERT INTO u VALUES (2), (3)").await;
-
-        let workspace = group.connections[2].1.connect().await.unwrap();
-        let joined = run(
-            workspace,
-            r#"SELECT * FROM "a"."main"."t" JOIN "bee"."main"."u" USING (id)"#,
-        )
-        .await;
-        assert_eq!(joined, 1);
-    }
-
-    #[test]
-    fn rejects_unusable_workspaces() {
-        let dir = tempfile::tempdir().unwrap();
-        let connection = "[connection.a]\nkind = \"sqlite\"\npath = \":memory:\"\n";
-        for (workspace, reason) in [
-            ("[workspace.w]\nconnections = []\n", "lists no connections"),
-            (
-                "[workspace.w]\nconnections = [\"a\", \"a\"]\n",
-                "names catalog `a` twice",
-            ),
-            (
-                "[workspace.w]\nconnections = [\"a\", { conn = \"z\", alias = \"a\" }]\n",
-                "names catalog `a` twice",
-            ),
-            ("[workspace.w]\nconnections = [\"z\"]\n", "names `z`"),
-            ("[workspace.a]\nconnections = [\"a\"]\n", "shares its name"),
-        ] {
-            let path = dir.path().join("connections.toml");
-            std::fs::write(&path, format!("{connection}{workspace}")).unwrap();
-            let Err(error) = ConnectionFile::load(&path) else {
-                panic!("{workspace} must be rejected");
-            };
-            assert!(error.to_string().contains(reason), "{error}");
-        }
     }
 
     #[test]
     fn repository_dev_config_loads() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.quill.toml");
         let file = ConnectionFile::load(&path).unwrap().unwrap();
-        assert!(!file.workspaces.is_empty());
+        assert!(!file.connections.is_empty());
     }
 
     #[test]

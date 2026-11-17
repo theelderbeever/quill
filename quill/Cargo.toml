@@ -9,7 +9,6 @@ anyhow.workspace = true
 clap.workspace = true
 dirs = "7.0.0"
 figment.workspace = true
-futures.workspace = true
 indexmap.workspace = true
 quill-core.workspace = true
 quill-providers.workspace = true

@@ -88,14 +88,11 @@ impl QueryTab {
                 _ => format!("{connection} is still connecting"),
             });
         };
-        let Some(results) = connections.results(connection) else {
-            return report(format!("{connection} is still connecting"));
-        };
         let sql = self.editor.sql_to_run();
         if sql.trim().is_empty() {
             return report("nothing to run".into());
         }
-        let run = Run::start(pool, results, sql, ctx.shared.messages.clone());
+        let run = Run::start(pool, sql, ctx.shared.messages.clone());
         self.stats.started(run.id());
         self.run = Some(run);
         self.results.running();
@@ -143,12 +140,6 @@ impl QueryTab {
             RunMsg::ServerMetrics { run, result } => self.stats.server(run, result),
             RunMsg::Derived { base, view, result } => {
                 return self.results.derived(base, view, result, ctx);
-            }
-            RunMsg::Saved { path, result } => {
-                return Some(match result {
-                    Ok(()) => Flash::Info(format!("saved {}", path.display())),
-                    Err(e) => Flash::Error(format!("save failed: {e:#}")),
-                });
             }
         }
         None
@@ -401,12 +392,7 @@ mod tests {
         let pool = SqliteConnectionPool::connect(&settings).await.unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut tabs = three();
-        tabs.active_mut().run = Some(Run::start(
-            std::sync::Arc::new(pool),
-            datafusion::prelude::SessionContext::new(),
-            "SELECT 1".into(),
-            tx,
-        ));
+        tabs.active_mut().run = Some(Run::start(std::sync::Arc::new(pool), "SELECT 1".into(), tx));
         tabs.sync(&[name("c")], &name("c"), &store()).unwrap();
         assert_eq!(names(&tabs), ["b", "c"]);
     }

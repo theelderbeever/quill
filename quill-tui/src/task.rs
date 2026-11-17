@@ -58,20 +58,16 @@ pub enum RunMsg {
         run: RunId,
         result: quill_core::error::Result<Option<ServerMetrics>>,
     },
-    /// A sorted or filtered view of `base`, collected in memory.
+    /// A sorted view of `base`.
     Derived {
         base: RunId,
         view: RunId,
         result: anyhow::Result<ResultTable>,
     },
-    Saved {
-        path: std::path::PathBuf,
-        result: anyhow::Result<()>,
-    },
 }
 
 impl RunMsg {
-    /// The run this update belongs to; `None` for one tied to no run.
+    /// The run this update belongs to.
     pub const fn run(&self) -> Option<RunId> {
         match self {
             Self::Started { run, .. }
@@ -80,7 +76,6 @@ impl RunMsg {
             | Self::Profile { run, .. }
             | Self::ServerMetrics { run, .. } => Some(*run),
             Self::Derived { base, .. } => Some(*base),
-            Self::Saved { .. } => None,
         }
     }
 }

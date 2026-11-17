@@ -1,35 +1,62 @@
+//! Query task lifetime, live metrics and batched event delivery shared by drivers.
 use quill_core::{
     error::{Error, Result},
     query::*,
+    value::{Column, Row, RowBatch},
 };
 use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
 use tokio::{sync::mpsc, task::JoinHandle};
+
+/// Rows per delivered batch; the event channel holds at most one more batch.
+const BATCH_ROWS: usize = 1024;
+
 #[derive(Debug, thiserror::Error)]
 #[error("query result consumer closed the stream")]
 struct ConsumerClosed;
+
+/// Asks the server to stop the statement this execution submitted.
+type ServerCancel = Box<dyn FnOnce() + Send>;
 
 pub(crate) struct Control {
     start: Instant,
     state: Mutex<ExecutionSnapshot>,
     task: Mutex<Option<JoinHandle<()>>>,
+    server_cancel: Mutex<Option<ServerCancel>>,
 }
 
 impl Control {
-    fn finish(&self, status: ExecutionStatus) {
+    /// Returns whether this call ended the execution.
+    fn finish(&self, status: ExecutionStatus) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.status == ExecutionStatus::Running {
-            state.status = status;
-            state.metrics.elapsed = self.start.elapsed();
+        if state.status != ExecutionStatus::Running {
+            return false;
         }
+        state.status = status;
+        state.metrics.elapsed = self.start.elapsed();
+        true
+    }
+
+    /// Register how to stop the submitted statement on the server. Runs at
+    /// most once, and only if the execution is cancelled while running.
+    pub(crate) fn on_server_cancel(&self, cancel: impl FnOnce() + Send + 'static) {
+        *self.server_cancel.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(cancel));
     }
 }
 
 impl ExecutionControl for Control {
     fn cancel(&self) {
-        self.finish(ExecutionStatus::Cancelled);
+        if self.finish(ExecutionStatus::Cancelled)
+            && let Some(cancel) = self
+                .server_cancel
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+        {
+            cancel();
+        }
         if let Some(task) = self.task.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             task.abort();
         }
@@ -60,6 +87,7 @@ where
     start_with_id(QueryId::new(), work)
 }
 
+/// Spawn `work` and return its execution. Timing starts now.
 pub(crate) fn start_with_id<F, Fut>(id: QueryId, work: F) -> QueryExecution
 where
     F: FnOnce(mpsc::Sender<Result<QueryEvent>>, Arc<Control>) -> Fut + Send + 'static,
@@ -72,6 +100,7 @@ where
             metrics: ClientMetrics::started(),
         }),
         task: Mutex::new(None),
+        server_cancel: Mutex::new(None),
     });
     // One pending event bounds memory and keeps the producer tied to consumption.
     let (sender, receiver) = mpsc::channel(1);
@@ -119,21 +148,100 @@ impl Control {
             }
             let metrics = &mut state.metrics;
             match &event {
-                QueryEvent::Batch { batch, .. } => {
-                    if batch.num_rows() > 0 && metrics.first_row.is_none() {
+                QueryEvent::Rows { batch, .. } => {
+                    if !batch.is_empty() && metrics.first_row.is_none() {
                         metrics.first_row = Some(self.start.elapsed());
                     }
-                    metrics.delivered_rows += batch.num_rows() as u64;
+                    metrics.delivered_rows += batch.len() as u64;
                     metrics.delivered_batches += 1;
                 }
                 QueryEvent::ResultSetComplete {
                     affected_rows: Some(affected),
                     ..
-                } => metrics.affected_rows = Some(*affected),
+                } => {
+                    *metrics.affected_rows.get_or_insert(0) += affected;
+                }
                 _ => {}
             }
         }
         permit.send(Ok(event));
+        Ok(())
+    }
+}
+
+/// Emits result sets in order: columns, batched rows, completion.
+pub(crate) struct Emitter<'a> {
+    sender: &'a mpsc::Sender<Result<QueryEvent>>,
+    control: &'a Control,
+    result_set: usize,
+    columns: Option<Arc<[Column]>>,
+    rows: Vec<Row>,
+}
+
+impl<'a> Emitter<'a> {
+    pub(crate) const fn new(
+        sender: &'a mpsc::Sender<Result<QueryEvent>>,
+        control: &'a Control,
+    ) -> Self {
+        Self {
+            sender,
+            control,
+            result_set: 0,
+            columns: None,
+            rows: Vec::new(),
+        }
+    }
+
+    /// Whether the current result set has announced its columns.
+    pub(crate) const fn has_columns(&self) -> bool {
+        self.columns.is_some()
+    }
+
+    /// Announce the current result set's columns.
+    pub(crate) async fn columns(&mut self, columns: Arc<[Column]>) -> Result<()> {
+        self.columns = Some(columns.clone());
+        let event = QueryEvent::Columns {
+            result_set: self.result_set,
+            columns,
+        };
+        self.control.send(self.sender, event).await
+    }
+
+    /// Queue a row of the current result set, delivering a full batch.
+    pub(crate) async fn row(&mut self, row: Row) -> Result<()> {
+        self.rows.push(row);
+        if self.rows.len() >= BATCH_ROWS {
+            self.flush().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> Result<()> {
+        if self.rows.is_empty() {
+            return Ok(());
+        }
+        let Some(columns) = self.columns.clone() else {
+            return Err(Error::MissingMetadata("result columns"));
+        };
+        let rows = std::mem::take(&mut self.rows);
+        let batch = RowBatch::new(columns, rows).map_err(|e| Error::QueryExecution(Box::new(e)))?;
+        let event = QueryEvent::Rows {
+            result_set: self.result_set,
+            batch,
+        };
+        self.control.send(self.sender, event).await
+    }
+
+    /// Finish the current result set and start the next.
+    pub(crate) async fn complete(&mut self, affected_rows: Option<u64>) -> Result<()> {
+        self.flush().await?;
+        let event = QueryEvent::ResultSetComplete {
+            result_set: self.result_set,
+            affected_rows,
+        };
+        self.control.send(self.sender, event).await?;
+        self.result_set += 1;
+        self.columns = None;
         Ok(())
     }
 }
@@ -156,14 +264,14 @@ mod tests {
     }
 
     fn batch(rows: i64) -> QueryEvent {
-        let values = arrow::array::Int64Array::from_iter_values(0..rows);
-        QueryEvent::Batch {
+        use quill_core::value::Value;
+        let columns: Arc<[Column]> = Arc::from([Column::new("v", "int8")]);
+        let rows = (0..rows)
+            .map(|v| Box::from([Value::Int(v)]) as Row)
+            .collect();
+        QueryEvent::Rows {
             result_set: 0,
-            batch: arrow::record_batch::RecordBatch::try_from_iter([(
-                "v",
-                Arc::new(values) as arrow::array::ArrayRef,
-            )])
-            .unwrap(),
+            batch: RowBatch::new(columns, rows).unwrap(),
         }
     }
 
@@ -218,6 +326,36 @@ mod tests {
             execution.control.snapshot().status,
             ExecutionStatus::Cancelled
         );
+    }
+
+    #[tokio::test]
+    async fn server_cancel_runs_once_and_only_while_running() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let register = |calls: Arc<AtomicUsize>, finish: bool| {
+            start(move |_, control| async move {
+                control.on_server_cancel(move || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                });
+                if finish {
+                    Ok(())
+                } else {
+                    std::future::pending().await
+                }
+            })
+        };
+        let mut finished = register(calls.clone(), true);
+        while finished.events.try_next().await.unwrap().is_some() {}
+        finished.control.cancel();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let running = register(calls.clone(), false);
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+        running.control.cancel();
+        running.control.cancel();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

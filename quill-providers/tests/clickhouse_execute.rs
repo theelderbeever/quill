@@ -4,7 +4,7 @@ mod execution;
 
 use execution::{TestResult, failures, nulls, rows, tls};
 use quill_core::query::*;
-use quill_providers::{Connect, ConnectionPool, clickhouse::*};
+use quill_providers::{Connect, clickhouse::*};
 
 fn settings(user: &str) -> ClickhouseSettings {
     ClickhouseSettings {
@@ -48,49 +48,26 @@ async fn clickhouse_execution() -> TestResult {
 }
 
 #[tokio::test]
-#[ignore = "upstream provider decodes String as Utf8 and fails on arbitrary bytes"]
+#[ignore = "requires Docker Compose ClickHouse"]
 async fn strings_preserve_arbitrary_bytes() -> TestResult {
-    use arrow::{
-        array::{Array, BinaryArray},
-        datatypes::DataType,
-    };
-    use futures::StreamExt;
-
+    use quill_core::value::Value;
     let pool = ClickhouseConnectionPool::connect(&settings("quill")).await?;
-    let sql = "SELECT if(number % 3 = 0, NULL, if(number % 3 = 1, unhex('FF0080'), 'hello')) AS bytes FROM numbers(2500) SETTINGS max_block_size = 1000";
-    let mut execution = pool.execute(QueryRequest::new(sql)).await?;
-    let mut schema = None;
-    let mut rows = 0;
-    let mut batches = 0;
-    while let Some(event) = execution.events.next().await {
-        match event? {
-            QueryEvent::Schema { schema: value, .. } => {
-                assert_eq!(value.field(0).data_type(), &DataType::Binary);
-                assert!(value.field(0).is_nullable());
-                schema = Some(value);
-            }
-            QueryEvent::Batch { batch, .. } => {
-                assert_eq!(Some(batch.schema()), schema);
-                let values = batch
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<BinaryArray>()
-                    .unwrap();
-                for i in 0..batch.num_rows() {
-                    match (rows + i) % 3 {
-                        0 => assert!(values.is_null(i)),
-                        1 => assert_eq!(values.value(i), &[0xff, 0x00, 0x80]),
-                        _ => assert_eq!(values.value(i), b"hello"),
-                    }
-                }
-                rows += batch.num_rows();
-                batches += 1;
-            }
-            _ => {}
+    let sql = "SELECT if(number % 3 = 0, NULL, if(number % 3 = 1, unhex('FF0080'), 'hello')) AS bytes, \
+               toDecimal256('123456789012345678901234567890.5', 2) AS wide, [1, 2] AS list \
+               FROM numbers(2500) SETTINGS max_block_size = 1000";
+    let set = execution::single(&pool, sql).await?;
+    assert_eq!(set.rows.len(), 2500);
+    for (i, row) in set.rows.iter().enumerate() {
+        match i % 3 {
+            0 => assert_eq!(row[0], Value::Null),
+            1 => assert_eq!(row[0], Value::Bytes(vec![0xff, 0x00, 0x80])),
+            _ => assert_eq!(row[0], Value::Text("hello".into())),
         }
     }
-    assert_eq!(rows, 2500);
-    assert!(batches > 1);
-
+    assert_eq!(
+        set.rows[0][1].to_string(),
+        "123456789012345678901234567890.50"
+    );
+    assert_eq!(set.rows[0][2], Value::Other("[1,2]".into()));
     Ok(())
 }

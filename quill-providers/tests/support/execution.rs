@@ -1,9 +1,14 @@
 #![allow(dead_code)]
 //! Server tests require the repository's Docker Compose services.
-use arrow::array::{Array, Int64Array};
+use std::sync::Arc;
+
 use futures::StreamExt;
-use quill_core::query::*;
+use quill_core::{
+    query::*,
+    value::{Column, Row, Value},
+};
 use quill_providers::ConnectionPool;
+
 pub fn tls() -> Option<quill_providers::settings::TlsSettings> {
     std::env::var_os("QUILL_TEST_TLS").map(|_| quill_providers::settings::TlsSettings {
         ca_cert: Some(
@@ -15,43 +20,93 @@ pub fn tls() -> Option<quill_providers::settings::TlsSettings> {
 
 pub type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-pub async fn rows(pool: &dyn ConnectionPool, request: QueryRequest, expected: usize) -> TestResult {
+/// One collected result set.
+#[derive(Debug, Default)]
+pub struct Set {
+    pub columns: Option<Arc<[Column]>>,
+    pub rows: Vec<Row>,
+    pub batches: usize,
+    pub affected_rows: Option<u64>,
+}
+
+/// Run `request` to completion, checking event order.
+pub async fn collect(
+    pool: &dyn ConnectionPool,
+    request: QueryRequest,
+) -> Result<Vec<Set>, Box<dyn std::error::Error>> {
     let mut execution = pool.execute(request).await?;
-    let mut schema = None;
-    let mut count = 0;
+    let mut sets: Vec<Set> = Vec::new();
+    let mut open: Option<Set> = None;
     let mut complete = false;
-    let mut result_complete = false;
     while let Some(event) = execution.events.next().await {
+        assert!(!complete, "events after completion");
         match event? {
-            QueryEvent::Schema { schema: value, .. } => {
-                assert!(schema.is_none());
-                schema = Some(value);
+            QueryEvent::Columns {
+                result_set,
+                columns,
+            } => {
+                assert!(open.is_none());
+                assert_eq!(result_set, sets.len());
+                open = Some(Set {
+                    columns: Some(columns),
+                    ..Set::default()
+                });
             }
-            QueryEvent::Batch { batch, .. } => {
-                assert_eq!(schema.as_ref(), Some(&batch.schema()));
-                let values = batch
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .ok_or("expected Int64")?;
-                for i in 0..values.len() {
-                    assert!(!values.is_null(i));
-                    assert_eq!(values.value(i), 42);
-                }
-                count += batch.num_rows();
+            QueryEvent::Rows { result_set, batch } => {
+                assert_eq!(result_set, sets.len());
+                let set = open.as_mut().ok_or("rows before columns")?;
+                assert_eq!(Some(batch.columns()), set.columns.as_ref());
+                set.rows.extend(batch.into_rows());
+                set.batches += 1;
             }
-            QueryEvent::ResultSetComplete { .. } => result_complete = true,
+            QueryEvent::ResultSetComplete {
+                result_set,
+                affected_rows,
+            } => {
+                assert_eq!(result_set, sets.len());
+                let mut set = open.take().unwrap_or_default();
+                set.affected_rows = affected_rows;
+                sets.push(set);
+            }
             QueryEvent::Complete => complete = true,
         }
     }
-    // Providers infer schemas from rows, so empty results may have none (docs/gaps.md).
-    assert!(schema.is_some() || expected == 0);
-    assert!(complete && result_complete);
-    assert_eq!(count, expected);
+    assert!(complete);
     let snapshot = execution.control.snapshot();
     assert_eq!(snapshot.status, ExecutionStatus::Completed);
-    assert_eq!(snapshot.metrics.delivered_rows, expected as u64);
-    assert_eq!(snapshot.metrics.first_row.is_some(), expected > 0);
+    let rows: usize = sets.iter().map(|s| s.rows.len()).sum();
+    assert_eq!(snapshot.metrics.delivered_rows, rows as u64);
+    assert_eq!(snapshot.metrics.first_row.is_some(), rows > 0);
+    Ok(sets)
+}
+
+/// The only result set of `sql`.
+pub async fn single(
+    pool: &dyn ConnectionPool,
+    sql: &str,
+) -> Result<Set, Box<dyn std::error::Error>> {
+    let mut sets = collect(pool, QueryRequest::new(sql)).await?;
+    assert_eq!(sets.len(), 1, "{sql}");
+    Ok(sets.remove(0))
+}
+
+/// `request` yields `expected` rows of a single column holding 42.
+pub async fn rows(pool: &dyn ConnectionPool, request: QueryRequest, expected: usize) -> TestResult {
+    let sets = collect(pool, request).await?;
+    assert_eq!(sets.len(), 1);
+    let set = &sets[0];
+    assert!(
+        set.columns.is_some(),
+        "result sets announce columns, even when empty"
+    );
+    assert_eq!(set.rows.len(), expected);
+    for row in &set.rows {
+        assert!(
+            matches!(row[0], Value::Int(42) | Value::UInt(42)),
+            "{:?}",
+            row[0]
+        );
+    }
     Ok(())
 }
 
@@ -79,27 +134,12 @@ pub async fn metrics(
     Ok((execution.id, QueryMetrics { client, server }))
 }
 
+/// `sql` yields one row whose single cell is NULL.
 pub async fn nulls(pool: &dyn ConnectionPool, sql: &str) -> TestResult {
-    let mut execution = pool.execute(QueryRequest::new(sql)).await?;
-    let mut schema = None;
-    let mut count = 0;
-    while let Some(event) = execution.events.next().await {
-        match event? {
-            QueryEvent::Schema { schema: value, .. } => schema = Some(value),
-            QueryEvent::Batch { batch, .. } => {
-                assert_eq!(schema.as_ref(), Some(&batch.schema()));
-                assert_eq!(batch.num_columns(), 1);
-                assert_eq!(batch.column(0).logical_null_count(), batch.num_rows());
-                count += batch.num_rows();
-            }
-            _ => {}
-        }
-    }
-    assert_eq!(count, 1);
-    assert_eq!(
-        execution.control.snapshot().status,
-        ExecutionStatus::Completed
-    );
+    let set = single(pool, sql).await?;
+    assert_eq!(set.rows.len(), 1);
+    assert_eq!(set.rows[0].len(), 1);
+    assert_eq!(set.rows[0][0], Value::Null);
     Ok(())
 }
 
@@ -117,7 +157,7 @@ pub async fn failures(pool: &dyn ConnectionPool, invalid: &str, streaming: &str)
     let mut execution = pool.execute(QueryRequest::new(streaming)).await?;
     assert!(matches!(
         execution.events.next().await.transpose()?,
-        Some(QueryEvent::Schema { .. })
+        Some(QueryEvent::Columns { .. })
     ));
     execution.control.cancel();
     let control = execution.control.clone();

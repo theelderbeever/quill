@@ -1,18 +1,12 @@
 //! Column statistics and server metrics for a finished run.
-use std::{sync::Arc, time::Duration};
+use std::{cmp::Ordering, sync::Arc, time::Duration};
 
-use arrow::{
-    array::AsArray,
-    datatypes::{DataType, Int64Type, SchemaRef},
-    util::display::{ArrayFormatter, FormatOptions},
-};
-use datafusion::prelude::SessionContext;
-use quill_core::query::QueryId;
+use quill_core::{query::QueryId, value::Value};
 use quill_providers::ConnectionPool;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::{RunId, RunMsg};
-use crate::{connection::quote, event::Msg};
+use crate::{event::Msg, result::ResultTable};
 
 /// Attempts at reading server metrics, which some servers log late.
 const METRIC_ATTEMPTS: u32 = 3;
@@ -22,7 +16,8 @@ pub struct ColumnProfile {
     pub name: String,
     pub data_type: String,
     pub nulls: u64,
-    /// Absent for types without an ordering, e.g. lists and structs.
+    /// Absent when every value is null, or for values without a useful
+    /// order: bytes and lists.
     pub min: Option<String>,
     pub max: Option<String>,
 }
@@ -32,83 +27,62 @@ pub struct Profile {
     pub columns: Vec<ColumnProfile>,
 }
 
-/// Types `min`/`max` order.
-fn orderable(data_type: &DataType) -> bool {
-    !data_type.is_nested()
-        && !matches!(
-            data_type,
-            DataType::Null
-                | DataType::Binary
-                | DataType::LargeBinary
-                | DataType::BinaryView
-                | DataType::FixedSizeBinary(_)
-        )
-}
-
-/// Profile `table`, a quoted name in `ctx`, with one full scan.
-pub fn spawn_profile(
-    ctx: SessionContext,
-    table: String,
-    schema: SchemaRef,
-    run: RunId,
-    messages: UnboundedSender<Msg>,
-) {
+/// Profile `table` with one pass per column, off the UI thread.
+pub fn spawn_profile(table: Arc<ResultTable>, run: RunId, messages: UnboundedSender<Msg>) {
     tokio::spawn(async move {
-        let result = profile(&ctx, &table, &schema).await;
+        let result = tokio::task::spawn_blocking(move || profile(&table))
+            .await
+            .map_err(anyhow::Error::from);
         let _ = messages.send(Msg::Run(RunMsg::Profile { run, result }));
     });
 }
 
-async fn profile(ctx: &SessionContext, table: &str, schema: &SchemaRef) -> anyhow::Result<Profile> {
-    let mut select = vec!["count(*) AS total".to_owned()];
-    for (i, field) in schema.fields().iter().enumerate() {
-        let column = quote(field.name(), '"');
-        select.push(format!("count({column}) AS c{i}"));
-        if orderable(field.data_type()) {
-            select.push(format!("min({column}) AS lo{i}, max({column}) AS hi{i}"));
-        }
-    }
-    let sql = format!("SELECT {} FROM {table}", select.join(", "));
-    let batches = ctx.sql(&sql).await?.collect().await?;
-    let batch = batches
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("profile returned no rows"))?;
-    let count = |name: &str| -> anyhow::Result<u64> {
-        let column = batch
-            .column_by_name(name)
-            .ok_or_else(|| anyhow::anyhow!("missing {name}"))?;
-        Ok(u64::try_from(column.as_primitive::<Int64Type>().value(0)).unwrap_or(0))
-    };
-    let options = FormatOptions::default();
-    let value = |name: &str| -> anyhow::Result<Option<String>> {
-        let Some(column) = batch.column_by_name(name) else {
-            return Ok(None);
-        };
-        if column.is_null(0) {
-            return Ok(None);
-        }
-        Ok(Some(
-            ArrayFormatter::try_new(column.as_ref(), &options)?
-                .value(0)
-                .to_string(),
-        ))
-    };
-    let rows = count("total")?;
-    let columns = schema
-        .fields()
+fn profile(table: &ResultTable) -> Profile {
+    let columns = table
+        .columns()
         .iter()
         .enumerate()
-        .map(|(i, field)| {
-            Ok(ColumnProfile {
-                name: field.name().clone(),
-                data_type: field.data_type().to_string(),
-                nulls: rows - count(&format!("c{i}"))?,
-                min: value(&format!("lo{i}"))?,
-                max: value(&format!("hi{i}"))?,
-            })
+        .map(|(i, column)| {
+            let mut nulls = 0;
+            let mut orderable = true;
+            let mut bounds: Option<(&Value, &Value)> = None;
+            for value in table.iter().map(|row| &row[i]) {
+                match value {
+                    Value::Null => nulls += 1,
+                    Value::Bytes(_) | Value::List(_) => orderable = false,
+                    value => {
+                        bounds = Some(match bounds {
+                            None => (value, value),
+                            Some((lo, hi)) => (
+                                if value.sort_cmp(lo) == Ordering::Less {
+                                    value
+                                } else {
+                                    lo
+                                },
+                                if value.sort_cmp(hi) == Ordering::Greater {
+                                    value
+                                } else {
+                                    hi
+                                },
+                            ),
+                        });
+                    }
+                }
+            }
+            let bounds = bounds.filter(|_| orderable);
+            ColumnProfile {
+                name: column.name.clone(),
+                data_type: column.native_type.clone(),
+                nulls,
+                min: bounds.map(|(lo, _)| lo.to_string()),
+                max: bounds.map(|(_, hi)| hi.to_string()),
+            }
         })
-        .collect::<anyhow::Result<_>>()?;
-    Ok(Profile { rows, columns })
+        .collect();
+    Profile {
+        rows: table.rows(),
+        columns,
+    }
 }
 
 /// Look up the server's measurements, retrying while the server reports none.

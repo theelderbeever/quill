@@ -5,7 +5,7 @@ use std::{path::PathBuf, time::Duration};
 #[derive(Debug, Clone, Deserialize)]
 pub struct SqliteSettings {
     pub path: PathBuf,
-    /// Additional database files, attached using the provider's schema names.
+    /// Additional database files, each attached under its file stem.
     #[serde(default)]
     pub databases: Vec<String>,
     /// How long a statement waits on a locked database before failing.
@@ -21,7 +21,7 @@ impl SqliteSettings {
     }
 }
 
-/// Matches the upstream provider's default.
+/// Long enough to wait out another connection's brief write lock.
 const fn default_busy_timeout_ms() -> u64 {
     5000
 }

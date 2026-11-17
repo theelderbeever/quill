@@ -170,16 +170,6 @@ impl App {
                 PaletteEvent::FilterCancelled => {
                     self.views.top_mut().set_filter(None);
                 }
-                PaletteEvent::Where(text) => {
-                    let ctx = self.shared.context(true);
-                    let flash = match self.views.top_mut() {
-                        View::Workspace(workspace) => workspace.set_filter(text, &ctx),
-                        _ => None,
-                    };
-                    if let Some(flash) = flash {
-                        self.show(flash);
-                    }
-                }
             }
             return;
         }
@@ -202,14 +192,9 @@ impl App {
             KeyOutcome::Ignored if capturing => {}
             KeyOutcome::Ignored => match key.code {
                 KeyCode::Char(':') => self.palette.open(palette::Mode::Command),
-                KeyCode::Char('/') => {
-                    if let Some((mode, text)) = self.views.top().filter_mode() {
-                        let text = text.to_owned();
-                        if mode == palette::Mode::Filter {
-                            self.views.top_mut().set_filter(None);
-                        }
-                        self.palette.open_with(mode, &text);
-                    }
+                KeyCode::Char('/') if self.views.top().filterable() => {
+                    self.views.top_mut().set_filter(None);
+                    self.palette.open(palette::Mode::Filter);
                 }
                 KeyCode::Esc => self.apply(Action::Back),
                 _ => {}
@@ -291,16 +276,6 @@ impl App {
             }
             Action::Report(message) => self.report(message),
             Action::Copy(text) => self.copy(text),
-            Action::Save(path) => {
-                let ctx = self.shared.context(true);
-                let flash = match self.views.top() {
-                    View::Workspace(workspace) => workspace.save(&path, &ctx),
-                    _ => Some(Flash::Error("open a query's results to save them".into())),
-                };
-                if let Some(flash) = flash {
-                    self.show(flash);
-                }
-            }
             Action::Quit => self.quit = true,
         }
     }
@@ -601,13 +576,6 @@ mod tests {
         assert!(app.should_quit());
     }
 
-    /// Result tables registered on a connection's session.
-    fn tables(session: &datafusion::prelude::SessionContext) -> usize {
-        let catalog = session.catalog("datafusion").expect("default catalog");
-        let schema = catalog.schema("public").expect("default schema");
-        schema.table_names().len()
-    }
-
     /// Receive background messages until `done` holds, redrawing between them.
     async fn pump(
         app: &mut App,
@@ -703,35 +671,19 @@ mod tests {
             .unwrap_or_default();
         assert!(first_row.contains("row 1000"), "{sorted}");
 
-        // A results condition collects just the matching rows.
+        // `/` does not filter results.
         press(&mut app, KeyCode::Char('/'));
-        type_text(&mut app, "x <= 3");
-        press(&mut app, KeyCode::Enter);
-        pump(&mut app, &mut rx, |s| s.contains("results · 3 rows")).await;
+        assert!(!app.palette.is_open());
 
         // The cursor cell's full value is what Ctrl-Shift-C or `y` copies.
-        press(&mut app, KeyCode::Char('g'));
         press(&mut app, KeyCode::Char('l'));
-        pump(&mut app, &mut rx, |s| s.contains("row 3")).await;
-        assert_eq!(app.views.top_mut().copy_text().as_deref(), Some("row 3"));
-
-        let out = dir.path().join("out.csv");
-        type_command(&mut app, &format!("save {}", out.display()));
-        pump(&mut app, &mut rx, |s| s.contains("saved ")).await;
-        let saved = std::fs::read_to_string(&out).unwrap();
-        assert_eq!(
-            saved.lines().collect::<Vec<_>>(),
-            ["x,label", "3,row 3", "2,row 2", "1,row 1"]
-        );
+        assert_eq!(app.views.top_mut().copy_text().as_deref(), Some("row 1000"));
 
         // Leaving the workspace keeps the run's result; disconnecting drops it.
-        let session = app.shared.connections.results(&lite).unwrap();
-        let runs = || tables(&session);
         press(&mut app, KeyCode::Esc);
-        // The base result and the filtered view drawn from it.
-        assert_eq!(runs(), 2);
+        assert!(app.sessions.contains_key(&lite));
         type_command(&mut app, "disconnect");
-        assert_eq!(runs(), 0);
+        assert!(!app.sessions.contains_key(&lite));
     }
 
     #[tokio::test]
@@ -784,11 +736,10 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert!(screen(&mut app, 160).contains("results · 1 rows"));
 
-        let session = app.shared.connections.results(&lite).unwrap();
-        let runs = || tables(&session);
-        assert_eq!(runs(), 1);
+        press(&mut app, KeyCode::Esc);
+        assert!(app.sessions.contains_key(&lite));
         type_command(&mut app, "disconnect");
-        assert_eq!(runs(), 0);
+        assert!(!app.sessions.contains_key(&lite));
     }
 
     #[tokio::test]

@@ -68,12 +68,3 @@ tables = [
   { name = "people_json", format = "json", path = "people_json/" },
   { name = "people_parquet", format = "parquet", path = "people_parquet/" },
 ]
-
-[workspace.federation]
-connections = [
-  { conn = "postgres", alias = "pg" },
-  { conn = "clickhouse", alias = "ch" },
-  { conn = "mysql", alias = "mysql" },
-  { conn = "scylla", alias = "scylla" },
-  { conn = "files", alias = "files" },
-]

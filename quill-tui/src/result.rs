@@ -1,4 +1,4 @@
-//! Query results held in memory on a connection's DataFusion context.
+//! Query results held in memory as the drivers decoded them.
 use std::{
     collections::BTreeMap,
     sync::{
@@ -7,14 +7,11 @@ use std::{
     },
 };
 
-use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
-use datafusion::{
-    datasource::MemTable, execution::session_state::SessionStateBuilder, prelude::SessionContext,
-};
 use futures::StreamExt;
-use quill_core::query::{ExecutionStatus, QueryEvent, QueryExecution};
-
-use crate::{connection::quote, task::RunId};
+use quill_core::{
+    query::{ExecutionStatus, QueryEvent, QueryExecution},
+    value::{Column, Row, RowBatch},
+};
 
 /// Live counters, shared with whoever displays progress.
 #[derive(Debug, Default)]
@@ -27,7 +24,7 @@ pub struct Progress {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Received {
     pub rows: u64,
-    /// Arrow memory held for the received batches.
+    /// Approximate memory held for the received rows.
     pub bytes: u64,
 }
 
@@ -39,11 +36,10 @@ impl Progress {
         }
     }
 
-    fn record(&self, batch: &RecordBatch) {
-        self.rows
-            .fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
+    fn record(&self, batch: &RowBatch) {
+        self.rows.fetch_add(batch.len() as u64, Ordering::Relaxed);
         self.bytes
-            .fetch_add(batch.get_array_memory_size() as u64, Ordering::Relaxed);
+            .fetch_add(batch.approx_bytes() as u64, Ordering::Relaxed);
     }
 }
 
@@ -70,93 +66,92 @@ pub struct CollectedSet {
     pub data: Option<ResultTable>,
 }
 
-/// A result registered on a session context, deregistered on drop.
+/// Rows in memory, shown in `order` when the view is sorted. Sorted views
+/// share their rows with the result they were drawn from.
+#[derive(Debug, Clone)]
 pub struct ResultTable {
-    ctx: SessionContext,
-    name: String,
-    schema: SchemaRef,
-    rows: u64,
+    columns: Arc<[Column]>,
+    rows: Arc<[Row]>,
+    order: Option<Arc<[usize]>>,
 }
 
 impl ResultTable {
-    /// Register `batches` under `name` as one ordered partition.
-    pub(crate) fn register(
-        ctx: &SessionContext,
-        name: String,
-        schema: SchemaRef,
-        batches: Vec<RecordBatch>,
-    ) -> datafusion::error::Result<Self> {
-        let rows = batches.iter().map(|b| b.num_rows() as u64).sum();
-        let table = MemTable::try_new(schema.clone(), vec![batches])?;
-        ctx.register_table(name.as_str(), Arc::new(table))?;
-        Ok(Self {
-            ctx: ctx.clone(),
-            name,
-            schema,
-            rows,
-        })
+    pub fn new(columns: Arc<[Column]>, rows: Vec<Row>) -> Self {
+        Self {
+            columns,
+            rows: rows.into(),
+            order: None,
+        }
     }
 
-    pub const fn schema(&self) -> &SchemaRef {
-        &self.schema
+    pub fn columns(&self) -> &Arc<[Column]> {
+        &self.columns
     }
 
-    pub const fn rows(&self) -> u64 {
-        self.rows
+    pub fn rows(&self) -> u64 {
+        self.rows.len() as u64
     }
 
-    /// The table name, quoted for SQL.
-    pub fn sql_name(&self) -> String {
-        quote(&self.name, '"')
+    /// The `index`th shown row.
+    pub fn row(&self, index: u64) -> Option<&Row> {
+        let index = usize::try_from(index).ok()?;
+        let index = match &self.order {
+            Some(order) => *order.get(index)?,
+            None => index,
+        };
+        self.rows.get(index)
     }
 
-    /// A context sharing this table's catalog that keeps row order. Results
-    /// have one partition; repartitioning a filter would shuffle it.
-    pub fn ordered(&self) -> SessionContext {
-        // Recreating the default catalog would replace the shared one and
-        // drop every registered result.
-        let config = self
-            .ctx
-            .copied_config()
-            .with_target_partitions(1)
-            .with_create_default_catalog_and_schema(false);
-        let state = SessionStateBuilder::new_from_existing(self.ctx.state())
-            .with_config(config)
-            .build();
-        SessionContext::new_with_state(state)
+    /// Every shown row, in shown order.
+    pub fn iter(&self) -> impl Iterator<Item = &Row> {
+        (0..self.rows()).filter_map(|i| self.row(i))
+    }
+
+    /// The base rows ordered by `column`, ties kept in their original order.
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use quill_core::value::{Column, Value};
+    /// # use quill_tui::result::ResultTable;
+    /// let table = ResultTable::new(
+    ///     Arc::from([Column::new("n", "int8")]),
+    ///     vec![Box::from([Value::Int(2)]), Box::from([Value::Null]), Box::from([Value::Int(1)])],
+    /// );
+    /// let sorted = table.sorted(0, false);
+    /// let values: Vec<_> = sorted.iter().map(|r| r[0].clone()).collect();
+    /// assert_eq!(values, [Value::Int(1), Value::Int(2), Value::Null]);
+    /// ```
+    pub fn sorted(&self, column: usize, descending: bool) -> Self {
+        let mut order: Vec<usize> = (0..self.rows.len()).collect();
+        order.sort_by(|&a, &b| {
+            let ordering = self.rows[a][column].sort_cmp(&self.rows[b][column]);
+            if descending {
+                ordering.reverse()
+            } else {
+                ordering
+            }
+        });
+        Self {
+            columns: self.columns.clone(),
+            rows: self.rows.clone(),
+            order: Some(order.into()),
+        }
     }
 }
 
-impl std::fmt::Debug for ResultTable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ResultTable")
-            .field("name", &self.name)
-            .field("rows", &self.rows)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Drop for ResultTable {
-    fn drop(&mut self) {
-        let _ = self.ctx.deregister_table(self.name.as_str());
-    }
-}
-
-/// A result set still receiving batches.
+/// A result set still receiving rows.
 struct OpenSet {
-    schema: SchemaRef,
-    batches: Vec<RecordBatch>,
+    columns: Arc<[Column]>,
+    rows: Vec<Row>,
 }
 
-/// Collect `execution` into tables on `ctx` named after `run`. Owning the
-/// execution means dropping this future cancels the query. Failures and
-/// cancellation are reported as [`Truncation`], keeping rows received so far.
+/// Collect `execution` in memory. Owning the execution means dropping this
+/// future cancels the query. Failures and cancellation are reported as
+/// [`Truncation`], keeping rows received so far.
 ///
 /// ```
 /// # use std::sync::Arc;
-/// # use arrow::{array::Int64Array, datatypes::*, record_batch::RecordBatch};
-/// # use datafusion::prelude::SessionContext;
-/// # use quill_core::query::*;
+/// # use quill_core::{query::*, value::*};
 /// # use quill_tui::result::{Progress, collect};
 /// # struct Done;
 /// # impl ExecutionControl for Done {
@@ -167,36 +162,28 @@ struct OpenSet {
 /// # }
 /// # #[tokio::main(flavor = "current_thread")]
 /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// # let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]));
-/// # let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from_iter_values(0..3))])?;
+/// # let columns: Arc<[Column]> = Arc::from([Column::new("n", "int8")]);
+/// # let rows = (0..3).map(|n| Box::from([Value::Int(n)]) as Row).collect();
+/// # let batch = RowBatch::new(columns.clone(), rows)?;
 /// # let events = vec![
-/// #     Ok(QueryEvent::Schema { result_set: 0, schema }),
-/// #     Ok(QueryEvent::Batch { result_set: 0, batch }),
+/// #     Ok(QueryEvent::Columns { result_set: 0, columns }),
+/// #     Ok(QueryEvent::Rows { result_set: 0, batch }),
 /// #     Ok(QueryEvent::ResultSetComplete { result_set: 0, affected_rows: None }),
 /// #     Ok(QueryEvent::Complete),
 /// # ];
 /// # let execution = QueryExecution { id: QueryId::new(), events: Box::pin(futures::stream::iter(events)), control: Arc::new(Done) };
-/// let ctx = SessionContext::new();
 /// let progress = Progress::default();
-/// let collected = collect(execution, &ctx, "run_0", &progress).await?;
+/// let collected = collect(execution, &progress).await;
 /// let table = collected.result_sets[0].data.as_ref().ok_or("rows")?;
 /// assert_eq!(table.rows(), 3);
 /// assert_eq!(progress.snapshot().rows, 3);
 /// # Ok(())
 /// # }
 /// ```
-pub async fn collect(
-    mut execution: QueryExecution,
-    ctx: &SessionContext,
-    prefix: &str,
-    progress: &Progress,
-) -> datafusion::error::Result<Collected> {
+pub async fn collect(mut execution: QueryExecution, progress: &Progress) -> Collected {
     let mut open: BTreeMap<usize, OpenSet> = BTreeMap::new();
     let mut done = Vec::new();
-    let finish = |index: usize, set: OpenSet| {
-        let name = format!("{prefix}_{index}");
-        ResultTable::register(ctx, name, set.schema, set.batches)
-    };
+    let finish = |set: OpenSet| ResultTable::new(set.columns, set.rows);
 
     let truncation = loop {
         let Some(event) = execution.events.next().await else {
@@ -206,44 +193,34 @@ pub async fn collect(
             };
         };
         match event {
-            Ok(QueryEvent::Schema { result_set, schema }) => {
-                let set = OpenSet {
-                    schema,
-                    batches: Vec::new(),
-                };
-                open.insert(result_set, set);
+            Ok(QueryEvent::Columns {
+                result_set,
+                columns,
+            }) => {
+                open.insert(
+                    result_set,
+                    OpenSet {
+                        columns,
+                        rows: Vec::new(),
+                    },
+                );
             }
-            Ok(QueryEvent::Batch { result_set, batch }) => {
-                if batch.num_rows() == 0 {
-                    continue;
-                }
+            Ok(QueryEvent::Rows { result_set, batch }) => {
                 progress.record(&batch);
-                match open.get_mut(&result_set) {
-                    Some(set) => set.batches.push(batch),
-                    // Providers may stream without announcing a schema first.
-                    None => {
-                        let set = OpenSet {
-                            schema: batch.schema(),
-                            batches: vec![batch],
-                        };
-                        open.insert(result_set, set);
-                    }
-                }
+                let set = open.entry(result_set).or_insert_with(|| OpenSet {
+                    columns: batch.columns().clone(),
+                    rows: Vec::new(),
+                });
+                set.rows.extend(batch.into_rows());
             }
             Ok(QueryEvent::ResultSetComplete {
                 result_set,
                 affected_rows,
-            }) => {
-                let data = open
-                    .remove(&result_set)
-                    .map(|set| finish(result_set, set))
-                    .transpose()?;
-                done.push(CollectedSet {
-                    index: result_set,
-                    affected_rows,
-                    data,
-                });
-            }
+            }) => done.push(CollectedSet {
+                index: result_set,
+                affected_rows,
+                data: open.remove(&result_set).map(finish),
+            }),
             Ok(QueryEvent::Complete) => break None,
             Err(e) => break Some(Truncation::Failed(e)),
         }
@@ -253,127 +230,12 @@ pub async fn collect(
         done.push(CollectedSet {
             index,
             affected_rows: None,
-            data: Some(finish(index, set)?),
+            data: Some(finish(set)),
         });
     }
     done.sort_by_key(|set| set.index);
-    Ok(Collected {
+    Collected {
         result_sets: done,
         truncation,
-    })
-}
-
-/// Table name prefix for a run's own result sets.
-pub fn run_prefix(run: RunId) -> String {
-    format!("run_{run}")
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use arrow::{
-        array::Int64Array,
-        datatypes::{DataType, Field, Schema},
-    };
-    use quill_core::query::*;
-
-    use super::*;
-
-    struct Done;
-    impl ExecutionControl for Done {
-        fn cancel(&self) {}
-        fn snapshot(&self) -> ExecutionSnapshot {
-            ExecutionSnapshot {
-                status: ExecutionStatus::Completed,
-                metrics: ClientMetrics::started(),
-            }
-        }
-    }
-
-    fn execution(batches: Vec<RecordBatch>) -> QueryExecution {
-        let schema = batches[0].schema();
-        let events = std::iter::once(QueryEvent::Schema {
-            result_set: 0,
-            schema,
-        })
-        .chain(batches.into_iter().map(|batch| QueryEvent::Batch {
-            result_set: 0,
-            batch,
-        }))
-        .chain([
-            QueryEvent::ResultSetComplete {
-                result_set: 0,
-                affected_rows: None,
-            },
-            QueryEvent::Complete,
-        ])
-        .map(Ok)
-        .collect::<Vec<_>>();
-        QueryExecution {
-            id: QueryId::new(),
-            events: Box::pin(futures::stream::iter(events)),
-            control: Arc::new(Done),
-        }
-    }
-
-    fn numbers(range: std::ops::Range<i64>) -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]));
-        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from_iter_values(range))]).unwrap()
-    }
-
-    /// Values of `n` from `sql`, in result order.
-    async fn values(ctx: &SessionContext, sql: &str) -> Vec<i64> {
-        let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
-        batches
-            .iter()
-            .flat_map(|b| {
-                let n = b.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
-                n.values().to_vec()
-            })
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn tables_live_on_the_session_until_dropped() {
-        let ctx = SessionContext::new();
-        let progress = Progress::default();
-        let collected = collect(execution(vec![numbers(0..10)]), &ctx, "run_0", &progress)
-            .await
-            .unwrap();
-        let table = collected
-            .result_sets
-            .into_iter()
-            .next()
-            .unwrap()
-            .data
-            .unwrap();
-        assert!(ctx.table_exist("run_0_0").unwrap());
-        let ordered = table.ordered();
-        assert_eq!(
-            values(&ordered, "SELECT n FROM run_0_0 LIMIT 3 OFFSET 4").await,
-            [4, 5, 6]
-        );
-        drop(table);
-        assert!(!ctx.table_exist("run_0_0").unwrap());
-    }
-
-    #[tokio::test]
-    async fn filters_keep_row_order_across_batches() {
-        let ctx = SessionContext::new();
-        let batches = (0..64).map(|i| numbers(i * 100..(i + 1) * 100)).collect();
-        let collected = collect(execution(batches), &ctx, "run_1", &Progress::default())
-            .await
-            .unwrap();
-        let table = collected
-            .result_sets
-            .into_iter()
-            .next()
-            .unwrap()
-            .data
-            .unwrap();
-        let kept = values(&table.ordered(), "SELECT n FROM run_1_0 WHERE n % 7 = 0").await;
-        assert!(kept.windows(2).all(|w| w[0] < w[1]));
-        assert_eq!(kept.len(), 915);
     }
 }

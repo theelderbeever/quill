@@ -118,33 +118,6 @@ pub trait ConnectionPool: Send + Sync {
         Box::pin(async { Err(Error::UnsupportedOperation("list indexes")) })
     }
 
-    /// A DataFusion table reading `table` from this connection, so it can be
-    /// queried alongside other connections in a federated session.
-    ///
-    /// ```no_run
-    /// use quill_providers::ConnectionPool;
-    /// use quill_core::{error::Result, metadata::TableRef};
-    /// async fn arrow_schema(pool: &dyn ConnectionPool, table: &TableRef) -> Result<()> {
-    ///     let provider = pool.table_provider(table).await?;
-    ///     assert!(!provider.schema().fields().is_empty());
-    ///     Ok(())
-    /// }
-    /// ```
-    fn table_provider<'a>(
-        &'a self,
-        _table: &'a TableRef,
-    ) -> PoolFuture<'a, std::sync::Arc<dyn datafusion::catalog::TableProvider>> {
-        Box::pin(async { Err(Error::UnsupportedOperation("table provider")) })
-    }
-
-    /// Object stores this pool's table providers read through. Any session
-    /// executing those providers must resolve the same stores.
-    fn object_stores(
-        &self,
-    ) -> Option<std::sync::Arc<dyn datafusion::execution::object_store::ObjectStoreRegistry>> {
-        None
-    }
-
     /// Describe a table without interpreting its names as SQL text.
     fn describe_table<'a>(&'a self, _table: &'a TableRef) -> PoolFuture<'a, TableMetadata> {
         Box::pin(async { Err(Error::UnsupportedOperation("describe table")) })

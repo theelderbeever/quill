@@ -2,7 +2,6 @@
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use datafusion::prelude::SessionContext;
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
@@ -47,8 +46,6 @@ struct DrawnColumn {
 pub struct Grid {
     run: RunId,
     table: Arc<ResultTable>,
-    /// Order-preserving context over `table`.
-    ctx: SessionContext,
     columns: Vec<String>,
     rows: u64,
     cursor_row: u64,
@@ -69,18 +66,11 @@ pub struct Grid {
 
 impl Grid {
     pub fn new(run: RunId, table: Arc<ResultTable>, page_rows: u64) -> Self {
-        let columns = table
-            .schema()
-            .fields()
-            .iter()
-            .map(|f| f.name().clone())
-            .collect();
+        let columns = table.columns().iter().map(|c| c.name.clone()).collect();
         let rows = table.rows();
-        let ctx = table.ordered();
         Self {
             run,
             table,
-            ctx,
             columns,
             rows,
             cursor_row: 0,
@@ -104,24 +94,16 @@ impl Grid {
         self.rows
     }
 
-    /// The shown rows, in shown order.
-    pub const fn table(&self) -> &Arc<ResultTable> {
-        &self.table
-    }
-
-    /// Order-preserving context over [`Self::table`].
-    pub const fn context(&self) -> &SessionContext {
-        &self.ctx
-    }
-
     /// The full value under the cursor, if its page is loaded.
     pub fn cell(&self) -> Option<&str> {
         let row = self.pages.row(self.cursor_row)?;
         row.cells.get(self.cursor_col).map(Cell::as_str)
     }
 
-    pub fn column(&self) -> Option<&str> {
-        self.columns.get(self.cursor_col).map(String::as_str)
+    /// The cursor's column, by index and name.
+    pub fn column(&self) -> Option<(usize, &str)> {
+        let name = self.columns.get(self.cursor_col)?;
+        Some((self.cursor_col, name))
     }
 
     /// Keep the cursor on the same column after a re-run or new view.
@@ -230,7 +212,7 @@ impl Grid {
         area: Rect,
         ctx: &Context,
         widths: &Widths,
-        sort: Option<(&str, Direction)>,
+        sort: Option<(usize, Direction)>,
     ) {
         if area.height < 2 || area.width == 0 {
             return;
@@ -245,8 +227,7 @@ impl Grid {
         let visible = self.top..(self.top + self.height).min(self.rows);
         for (index, rows) in self.pages.request(visible.clone()) {
             page::spawn(
-                self.ctx.clone(),
-                self.table.sql_name(),
+                self.table.clone(),
                 self.run,
                 index,
                 rows,
@@ -254,8 +235,10 @@ impl Grid {
             );
         }
 
-        let header_name = |name: &str| match sort {
-            Some((column, direction)) if column == name => format!("{name} {}", direction.arrow()),
+        let header_name = |index: usize, name: &str| match sort {
+            Some((column, direction)) if column == index => {
+                format!("{name} {}", direction.arrow())
+            }
             _ => name.to_owned(),
         };
         let cap = usize::from(ctx.options().max_column_width.max(1));
@@ -273,7 +256,7 @@ impl Grid {
                             .get(i)
                             .map(|c| columns::display_width(c.display()))
                     })
-                    .chain([columns::display_width(&header_name(name))])
+                    .chain([columns::display_width(&header_name(i, name))])
                     .max()
                     .unwrap_or(1);
                 let auto = u16::try_from(longest.clamp(1, cap)).unwrap_or(u16::MAX);
@@ -308,7 +291,10 @@ impl Grid {
             } else {
                 theme::TITLE
             };
-            Span::styled(columns::fit(&header_name(&self.columns[i]), width), style)
+            Span::styled(
+                columns::fit(&header_name(i, &self.columns[i]), width),
+                style,
+            )
         }));
         let body = visible.clone().map(|r| {
             let number = Span::styled((r + 1).to_string(), theme::GUTTER);

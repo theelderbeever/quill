@@ -12,7 +12,7 @@ use crate::{
     event::Msg,
     filter::Filter,
     store::queries::QueryName,
-    widget::palette::{Flash, Mode},
+    widget::palette::Flash,
 };
 use connections::ConnectionsView;
 use queries::QueriesView;
@@ -72,13 +72,9 @@ impl View {
         }
     }
 
-    /// What `/` edits here, with the current text: a live list filter or
-    /// a results condition.
-    pub fn filter_mode(&self) -> Option<(Mode, &str)> {
-        match self {
-            Self::Connections(_) | Self::Queries(_) => Some((Mode::Filter, "")),
-            Self::Workspace(view) => view.filter().map(|text| (Mode::Where, text)),
-        }
+    /// Whether `/` narrows a list here.
+    pub const fn filterable(&self) -> bool {
+        matches!(self, Self::Connections(_) | Self::Queries(_))
     }
 
     /// Narrow a list view. Returns false for views without a list.

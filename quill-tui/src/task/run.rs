@@ -1,7 +1,6 @@
 //! Execute a query and collect it in memory, reporting live progress.
 use std::{sync::Arc, time::Instant};
 
-use datafusion::prelude::SessionContext;
 use quill_core::query::{ClientMetrics, ExecutionControl, QueryId, QueryRequest};
 use quill_providers::ConnectionPool;
 use tokio::{sync::mpsc::UnboundedSender, task::JoinHandle};
@@ -23,10 +22,9 @@ pub struct Run {
 }
 
 impl Run {
-    /// Collect into tables on `results`, the connection's session context.
+    /// Collect the results in memory.
     pub fn start(
         pool: Arc<dyn ConnectionPool>,
-        results: SessionContext,
         sql: String,
         messages: UnboundedSender<Msg>,
     ) -> Self {
@@ -43,10 +41,7 @@ impl Run {
                         control: execution.control.clone(),
                     };
                     let _ = messages.send(Msg::Run(started));
-                    let prefix = result::run_prefix(id);
-                    let collected =
-                        result::collect(execution, &results, &prefix, &progress).await?;
-                    anyhow::Ok(collected)
+                    anyhow::Ok(result::collect(execution, &progress).await)
                 }
                 .await;
                 let _ = messages.send(Msg::Run(RunMsg::Finished { run: id, result }));

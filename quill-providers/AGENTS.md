@@ -1,36 +1,28 @@
-## Upstream Providers
+## Native Providers
 
-- Each kind wraps a `datafusion-table-providers` pool in `ProviderPool`; per-kind modules only map
-  settings to the upstream pool and its table factory. Build a client or session in quill only when
-  upstream params cannot express a setting (TLS identities, custom CAs).
-- Upstream providers own query execution and Arrow conversion. When one falls short of the rules
-  below, record it in `docs/gaps.md` under that upstream rather than converting around it here.
-  The rules describe the parity a fork must reach.
+- Each kind talks to its database through that database's own client: sqlx for Postgres, MySQL
+  and SQLite, `clickhouse` for ClickHouse, `scylla` for Cassandra/ScyllaDB. DataFusion serves only
+  local files and object stores.
+- SQL is sent unchanged in the database's own dialect. Unbound SQL runs as a script where the
+  client supports it, yielding one result set per statement.
+- Stream results through `execution::Emitter`; never collect a whole result before delivery.
 
 ## Query Execution
 
-- Delegate query and parameter validation to the upstream provider or database. Do not parse
-  SQL or add checks for parameter counts, missing or unused bindings, or other conditions the native
-  driver already reports descriptively. Adapt bindings to the native API and propagate its errors.
+- Delegate query and parameter validation to the database. Do not parse SQL or add checks for
+  parameter counts, missing or unused bindings, or other conditions the native driver already
+  reports descriptively. Adapt bindings to the native API and propagate its errors.
+- Register server-side cancellation with `Control::on_server_cancel` where the database supports
+  it (`pg_cancel_backend`, `KILL QUERY`).
 
-## DataType Handling
+## Value Handling
 
-- Preserve native value semantics and precision when converting results to Arrow. RecordBatch values
-  are data for downstream computation, not display strings. Do not silently round, truncate, or
-  convert exact numbers to floating point.
-- Use native precision and scale metadata to select Decimal128 or Decimal256 where representable.
-  Establish a stable schema before emitting batches; do not infer a decimal width or scale from a
-  sample of values that later batches may exceed.
-- Fall back to Utf8 for decimals whose precision and scale are undeclared or unavailable, or whose
-  declared type or values cannot be represented exactly by Arrow's decimal types. Preserve their
-  exact numeric value in the text representation. Choose the fallback before emitting the schema;
-  do not change a field's type between batches.
-- Annotate semantic types represented as text using Arrow field metadata. Use `quill.native_type`
-  for the database type, `quill.logical_type` for its shared semantic type, and `quill.encoding` for
-  its representation. Text-backed decimals use logical type `decimal` and encoding `text`.
-  Ordinary text columns must not be labeled as decimals.
-- Preserve field metadata in both schema events and RecordBatch schemas. Consumers should be able
-  to distinguish a native text value from a typed value carried as text.
-- Test Arrow schemas, exact stored values, nulls, and field metadata, including consistency across
-  batches. Cover precision boundaries and unsupported values; formatted display output alone does
-  not establish conversion correctness.
+- Conversion into `quill_core::value::Value` is total. A cell Quill cannot decode becomes
+  `Value::Other` with the server's text, or `Value::Bytes` when only binary is available. Never
+  fail a query because of a type.
+- Preserve native semantics and precision. Exact numbers stay exact (`Value::Decimal` or
+  integers); never round or convert them to floating point.
+- Report each column's native type spelling in `Column::native_type`.
+- Announce columns for empty results too, describing the statement when the client reports
+  columns only alongside rows.
+- Test exact decoded values and nulls per type, in every wire format the provider uses.

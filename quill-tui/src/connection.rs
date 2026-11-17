@@ -6,7 +6,6 @@ use std::{
     sync::Arc,
 };
 
-use datafusion::prelude::SessionContext;
 use indexmap::IndexMap;
 use quill_core::{error::Result, metadata::TableRef};
 use quill_providers::{ConnectionPool, PoolFuture};
@@ -118,11 +117,9 @@ pub enum Target {
     Many(Filter),
 }
 
-/// A connected session: the pool and the DataFusion context its results
-/// live in. Dropping it releases every result held for the connection.
+/// A connected session. Dropping it closes the pool.
 pub struct Session {
     pub pool: Arc<dyn ConnectionPool>,
-    pub results: SessionContext,
 }
 
 pub enum ConnectionState {
@@ -273,14 +270,6 @@ impl Connections {
         }
     }
 
-    /// The context holding `id`'s results while it is connected.
-    pub(crate) fn results(&self, id: &ConnectionId) -> Option<SessionContext> {
-        match self.state(id)? {
-            ConnectionState::Connected(session) => Some(session.results.clone()),
-            _ => None,
-        }
-    }
-
     /// Id, kind and state of each connection, in display order.
     pub(crate) fn iter(
         &self,
@@ -316,10 +305,7 @@ impl Connections {
             return;
         }
         entry.state = match result {
-            Ok(pool) => ConnectionState::Connected(Session {
-                pool,
-                results: SessionContext::new(),
-            }),
+            Ok(pool) => ConnectionState::Connected(Session { pool }),
             Err(error) => ConnectionState::Failed(error_chain(&error)),
         };
     }

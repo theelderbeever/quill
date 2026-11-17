@@ -51,7 +51,7 @@ stored columns. Add new stable server type families here as images evolve;
 SQL errors intentionally fail the runner rather than silently omit coverage.
 RustFS is object storage and has no database column types.
 
-## RustFS datasets and federation
+## RustFS datasets
 
 `just seed-types` also requires `uv` and runs `objects.py` with isolated Python
 dependencies. It creates the `quill` bucket and overwrites only
@@ -63,8 +63,6 @@ RustFS TLS; direct invocation defaults to HTTPS with the development CA, or acce
 `RUSTFS_ENDPOINT=http://localhost:9000` for plaintext services.
 
 The repository `.quill.toml` registers these as `people_csv`, `people_json`, and
-`people_parquet` in the `files` connection. Open its `federation` workspace to
-connect PostgreSQL (`pg`), MySQL (`mysql`), ClickHouse (`ch`), Scylla (`scylla`),
-and RustFS (`files`) together. This configuration targets the TLS Docker setup;
-start with `just docker --tls` before seeding. SQLite remains an independent
+`people_parquet` in the `files` connection. This configuration targets the TLS Docker setup;
+start with `just docker --tls` before seeding. SQLite is an
 in-memory connection because Compose does not run SQLite.

@@ -28,8 +28,8 @@ async fn sqlite_execution() -> TestResult {
 }
 
 #[tokio::test]
-async fn sqlite_bindings_and_empty_schema() -> TestResult {
-    use futures::TryStreamExt;
+async fn sqlite_bindings_scripts_and_empty_columns() -> TestResult {
+    use quill_core::value::Value;
     use quill_providers::ConnectionPool;
     let pool = SqliteConnectionPool::connect(&SqliteSettings {
         path: ":memory:".into(),
@@ -38,26 +38,32 @@ async fn sqlite_bindings_and_empty_schema() -> TestResult {
         params: Default::default(),
     })
     .await?;
-    assert!(pool.capabilities().named_parameters);
     assert!(pool.capabilities().positional_parameters);
     let mut request = QueryRequest::new("SELECT ? AS bound");
     request.bindings.positional.push(ParameterValue::Int64(42));
     rows(&pool, request, 1).await?;
-    let mut request = QueryRequest::new("SELECT :value AS bound");
-    request
-        .bindings
-        .named
-        .insert("value".into(), ParameterValue::Int64(42));
-    rows(&pool, request, 1).await?;
-    let mut execution = pool
-        .execute(QueryRequest::new(
-            "SELECT CAST(NULL AS INTEGER) AS value WHERE false",
-        ))
-        .await?;
-    let Some(QueryEvent::Schema { schema, .. }) = execution.events.try_next().await? else {
-        panic!("empty query must preserve its schema");
-    };
-    assert_eq!(schema.fields().len(), 1);
-    while execution.events.try_next().await?.is_some() {}
+    let empty =
+        execution::single(&pool, "SELECT CAST(NULL AS INTEGER) AS value WHERE false").await?;
+    assert_eq!(empty.columns.ok_or("empty results keep columns")?.len(), 1);
+    let sets = execution::collect(
+        &pool,
+        QueryRequest::new(
+            "CREATE TABLE t (id INTEGER, label TEXT, data BLOB); \
+             INSERT INTO t VALUES (1, 'a', x'ff00'), (2, NULL, NULL); \
+             SELECT * FROM t ORDER BY id",
+        ),
+    )
+    .await?;
+    assert_eq!(sets.len(), 3);
+    assert_eq!(sets[1].affected_rows, Some(2));
+    assert_eq!(
+        sets[2].rows[0].to_vec(),
+        [
+            Value::Int(1),
+            Value::Text("a".into()),
+            Value::Bytes(vec![0xff, 0])
+        ]
+    );
+    assert_eq!(sets[2].rows[1][1], Value::Null);
     Ok(())
 }

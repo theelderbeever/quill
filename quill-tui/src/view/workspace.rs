@@ -7,7 +7,7 @@ mod results;
 mod stats;
 mod tab;
 
-use std::{ops::Range, path::Path, time::Instant};
+use std::{ops::Range, time::Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
@@ -217,21 +217,6 @@ impl Workspace {
                 kept.join(", ")
             ))
         }))
-    }
-
-    /// Whether `/` should edit a results condition: the results have focus
-    /// and hold rows. Returns the current condition.
-    pub fn filter(&self) -> Option<&str> {
-        let results = &self.tabs.active().results;
-        (self.focus == Panel::Results && results.has_grid()).then(|| results.filter())
-    }
-
-    pub fn set_filter(&mut self, filter: String, ctx: &Context) -> Option<Flash> {
-        self.tabs.active_mut().results.set_filter(filter, ctx)
-    }
-
-    pub fn save(&self, path: &Path, ctx: &Context) -> Option<Flash> {
-        self.tabs.active().results.save(path, ctx)
     }
 
     /// The active tab's run progress, shown on the palette line.
@@ -516,6 +501,7 @@ impl Component for Workspace {
 mod tests {
     use super::*;
     use crate::connection::testing::{connections, id};
+    use std::path::Path;
 
     fn watch(dir: &Path) -> QueryWatch {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

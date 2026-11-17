@@ -1,5 +1,6 @@
 mod metadata;
 use metadata::ColumnField;
+mod values;
 
 mod settings;
 pub use settings::{
@@ -8,7 +9,6 @@ pub use settings::{
 };
 
 use datafusion::{
-    catalog::TableProvider,
     physical_plan::ExecutionPlan,
     prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionContext},
 };
@@ -100,12 +100,6 @@ impl DatafusionConnectionPool {
 }
 
 impl ConnectionPool for DatafusionConnectionPool {
-    fn object_stores(
-        &self,
-    ) -> Option<Arc<dyn datafusion::execution::object_store::ObjectStoreRegistry>> {
-        Some(self.inner.runtime_env().object_store_registry.clone())
-    }
-
     fn execute(
         &self,
         request: quill_core::query::QueryRequest,
@@ -118,7 +112,6 @@ impl ConnectionPool for DatafusionConnectionPool {
                 id,
                 move |sender, control| async move {
                     use futures::TryStreamExt;
-                    use quill_core::query::QueryEvent;
                     if !request.bindings.named.is_empty() || !request.bindings.positional.is_empty()
                     {
                         return Err(Error::UnsupportedOperation("query parameters"));
@@ -136,39 +129,20 @@ impl ConnectionPool for DatafusionConnectionPool {
                         let mut stream =
                             datafusion::physical_plan::execute_stream(plan.clone(), task)
                                 .map_err(|e| Error::QueryExecution(Box::new(e)))?;
-                        control
-                            .send(
-                                &sender,
-                                QueryEvent::Schema {
-                                    result_set: 0,
-                                    schema: stream.schema(),
-                                },
-                            )
-                            .await?;
+                        let mut out = crate::execution::Emitter::new(&sender, &control);
+                        out.columns(values::columns(&stream.schema())).await?;
                         while let Some(batch) = stream
                             .try_next()
                             .await
                             .map_err(|e| Error::QueryExecution(Box::new(e)))?
                         {
-                            control
-                                .send(
-                                    &sender,
-                                    QueryEvent::Batch {
-                                        result_set: 0,
-                                        batch,
-                                    },
-                                )
-                                .await?;
+                            for row in values::rows(&batch)
+                                .map_err(|e| Error::QueryExecution(Box::new(e)))?
+                            {
+                                out.row(row).await?;
+                            }
                         }
-                        control
-                            .send(
-                                &sender,
-                                QueryEvent::ResultSetComplete {
-                                    result_set: 0,
-                                    affected_rows: None,
-                                },
-                            )
-                            .await
+                        out.complete(None).await
                     };
                     // Failed executions keep the metrics gathered up to the failure.
                     let result = stream.await;
@@ -229,21 +203,6 @@ impl ConnectionPool for DatafusionConnectionPool {
                 .collect())
         })
     }
-    fn table_provider<'a>(&'a self, table: &'a TableRef) -> PoolFuture<'a, Arc<dyn TableProvider>> {
-        Box::pin(async move {
-            let schema = self
-                .inner
-                .catalog(&table.schema.catalog.name)
-                .and_then(|c| c.schema(&table.schema.name))
-                .ok_or_else(|| Error::DriverExecute(anyhow::anyhow!("schema not found")))?;
-            schema
-                .table(&table.name)
-                .await
-                .map_err(|e| Error::DriverExecute(e.into()))?
-                .ok_or_else(|| Error::DriverExecute(anyhow::anyhow!("table not found")))
-        })
-    }
-
     fn describe_table<'a>(&'a self, table: &'a TableRef) -> PoolFuture<'a, TableMetadata> {
         Box::pin(async move {
             let provider = self

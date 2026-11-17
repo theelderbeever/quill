@@ -29,9 +29,6 @@ pub enum Error {
     #[error("driver execute failed")]
     DriverExecute(#[source] anyhow::Error),
 
-    #[error("federation")]
-    Federation(#[source] anyhow::Error),
-
     #[error("gui channel closed")]
     GuiChannel,
 }

@@ -1,7 +1,6 @@
 mod execution;
 mod pool;
-mod provider;
-pub use provider::{FactoryError, ProviderPool, Tables, UpstreamPool};
+mod sql;
 
 pub mod settings;
 
@@ -14,4 +13,3 @@ pub mod postgres;
 pub mod sqlite;
 
 pub mod datafusion;
-pub mod federation;

@@ -1,10 +1,10 @@
 //! The results panel: progress while running, then a paged grid that can be
-//! sorted, filtered and saved.
+//! sorted.
 mod columns;
 mod grid;
 mod page;
 
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use ratatui::{
@@ -17,7 +17,7 @@ use ratatui::{
 use crate::{
     action::Action,
     component::{Component, Context, KeyHint, KeyOutcome},
-    connection::{error_chain, quote},
+    connection::error_chain,
     format,
     result::{Collected, ResultTable, Truncation},
     task::{RunId, derive, page::Page, stats},
@@ -34,7 +34,6 @@ const GRID_HINTS: &[KeyHint] = &[
     KeyHint::new("enter", "inspect"),
     KeyHint::new("y", "copy cell"),
     KeyHint::new("s", "sort"),
-    KeyHint::new("/", "where"),
     KeyHint::new("-/+/=", "width"),
 ];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,13 +43,6 @@ pub enum Direction {
 }
 
 impl Direction {
-    const fn sql(self) -> &'static str {
-        match self {
-            Self::Ascending => "ASC",
-            Self::Descending => "DESC",
-        }
-    }
-
     pub const fn arrow(self) -> &'static str {
         match self {
             Self::Ascending => "▲",
@@ -63,54 +55,29 @@ impl Direction {
 struct Base {
     run: RunId,
     table: Arc<ResultTable>,
-    columns: Vec<String>,
 }
 
 impl Base {
     fn new(run: RunId, table: ResultTable) -> Self {
-        let columns = table
-            .schema()
-            .fields()
-            .iter()
-            .map(|f| f.name().clone())
-            .collect();
         Self {
             run,
             table: Arc::new(table),
-            columns,
         }
-    }
-
-    fn select_list(&self) -> String {
-        let quoted: Vec<String> = self.columns.iter().map(|c| quote(c, '"')).collect();
-        quoted.join(", ")
     }
 }
 
-/// How the shown rows differ from the base result.
+/// How the shown rows differ from the base result: a sort column, by
+/// index and name, and its direction.
 #[derive(Default)]
 struct ViewSpec {
-    filter: Option<String>,
-    sort: Option<(String, Direction)>,
+    sort: Option<(usize, String, Direction)>,
 }
 
 impl ViewSpec {
-    const fn is_plain(&self) -> bool {
-        self.filter.is_none() && self.sort.is_none()
-    }
-
     fn describe(&self) -> Option<String> {
-        let parts: Vec<String> = self
-            .filter
-            .iter()
-            .map(|f| format!("where {f}"))
-            .chain(
-                self.sort
-                    .iter()
-                    .map(|(c, d)| format!("sort {c} {}", d.arrow())),
-            )
-            .collect();
-        (!parts.is_empty()).then(|| parts.join(" · "))
+        self.sort
+            .as_ref()
+            .map(|(_, c, d)| format!("sort {c} {}", d.arrow()))
     }
 }
 
@@ -170,14 +137,6 @@ impl Results {
         matches!(self.state, State::Ready(_))
     }
 
-    /// The current results condition, to edit in the palette.
-    pub fn filter(&self) -> &str {
-        match &self.state {
-            State::Ready(ready) => ready.spec.filter.as_deref().unwrap_or(""),
-            _ => "",
-        }
-    }
-
     /// Show a finished run and start profiling it. The last result set
     /// holding rows is shown.
     pub fn finish(&mut self, run: RunId, result: anyhow::Result<Collected>, ctx: &Context) {
@@ -230,13 +189,7 @@ impl Results {
 
     fn ready(run: RunId, data: ResultTable, ctx: &Context) -> Ready {
         let base = Base::new(run, data);
-        stats::spawn_profile(
-            base.table.ordered(),
-            base.table.sql_name(),
-            base.table.schema().clone(),
-            run,
-            ctx.shared.messages.clone(),
-        );
+        stats::spawn_profile(base.table.clone(), run, ctx.shared.messages.clone());
         let page_rows = ctx.options().page_rows.get();
         let grid = Grid::new(run, base.table.clone(), page_rows);
         Ready {
@@ -248,72 +201,45 @@ impl Results {
     }
 
     /// Re-derive the shown rows after the view spec changed.
-    fn derive(ready: &mut Ready, ctx: &Context) -> anyhow::Result<()> {
-        if ready.spec.is_plain() {
+    fn derive(ready: &mut Ready, ctx: &Context) {
+        let Some((column, _, direction)) = &ready.spec.sort else {
             let page_rows = ctx.options().page_rows.get();
             let grid = Grid::new(ready.base.run, ready.base.table.clone(), page_rows);
             let previous = std::mem::replace(&mut ready.grid, grid);
             ready.grid.follow(&previous);
             ready.pending = None;
-            return Ok(());
-        }
-        let mut sql = format!(
-            "SELECT {} FROM {}",
-            ready.base.select_list(),
-            ready.base.table.sql_name()
-        );
-        if let Some(filter) = &ready.spec.filter {
-            sql.push_str(&format!(" WHERE {filter}"));
-        }
-        // A filter alone keeps the original order through the ordered context.
-        if let Some((column, direction)) = &ready.spec.sort {
-            sql.push_str(&format!(
-                " ORDER BY {} {}",
-                quote(column, '"'),
-                direction.sql()
-            ));
-        }
+            return;
+        };
         let view = RunId::next();
         ready.pending = Some(view);
-        let messages = ctx.shared.messages.clone();
         derive::spawn_view(
-            ready.base.table.ordered(),
-            sql,
+            ready.base.table.clone(),
+            *column,
+            *direction == Direction::Descending,
             ready.base.run,
             view,
-            messages,
+            ctx.shared.messages.clone(),
         );
-        Ok(())
-    }
-
-    /// Apply a SQL condition to the shown rows; empty clears it.
-    pub fn set_filter(&mut self, filter: String, ctx: &Context) -> Option<Flash> {
-        let State::Ready(ready) = &mut self.state else {
-            return Some(Flash::Error("no results to filter".into()));
-        };
-        ready.spec.filter = (!filter.is_empty()).then_some(filter);
-        Self::derive(ready, ctx)
-            .err()
-            .map(|e| Flash::Error(format!("{e:#}")))
     }
 
     /// Ascending, then descending, then unsorted, on the cursor's column.
-    fn cycle_sort(&mut self, ctx: &Context) -> anyhow::Result<()> {
+    fn cycle_sort(&mut self, ctx: &Context) {
         let State::Ready(ready) = &mut self.state else {
-            return Ok(());
+            return;
         };
-        let Some(column) = ready.grid.column().map(str::to_owned) else {
-            return Ok(());
+        let Some((index, column)) = ready.grid.column() else {
+            return;
         };
+        let column = column.to_owned();
         ready.spec.sort = match ready.spec.sort.take() {
-            Some((c, Direction::Ascending)) if c == column => Some((c, Direction::Descending)),
-            Some((c, Direction::Descending)) if c == column => None,
-            _ => Some((column, Direction::Ascending)),
+            Some((i, c, Direction::Ascending)) if i == index => Some((i, c, Direction::Descending)),
+            Some((i, _, Direction::Descending)) if i == index => None,
+            _ => Some((index, column, Direction::Ascending)),
         };
-        Self::derive(ready, ctx)
+        Self::derive(ready, ctx);
     }
 
-    /// A sorted or filtered view finished collecting.
+    /// A sorted view finished.
     pub fn derived(
         &mut self,
         base: RunId,
@@ -336,27 +262,6 @@ impl Results {
         let grid = Grid::new(view, Arc::new(table), page_rows);
         let previous = std::mem::replace(&mut ready.grid, grid);
         ready.grid.follow(&previous);
-        None
-    }
-
-    /// Export the shown rows, in their shown order, to `path`.
-    pub fn save(&self, path: &Path, ctx: &Context) -> Option<Flash> {
-        let State::Ready(ready) = &self.state else {
-            return Some(Flash::Error("no results to save".into()));
-        };
-        let target = path.to_string_lossy().replace('\'', "''");
-        let sql = format!(
-            "COPY (SELECT {} FROM {}) TO '{target}'",
-            ready.base.select_list(),
-            ready.grid.table().sql_name(),
-        );
-        let messages = ctx.shared.messages.clone();
-        derive::spawn_save(
-            ready.grid.context().clone(),
-            sql,
-            path.to_path_buf(),
-            messages,
-        );
         None
     }
 
@@ -432,10 +337,8 @@ impl Component for Results {
             });
         }
         if key.code == KeyCode::Char('s') && self.has_grid() {
-            return match self.cycle_sort(ctx) {
-                Ok(()) => KeyOutcome::Consumed,
-                Err(e) => KeyOutcome::Action(Action::Report(format!("{e:#}"))),
-            };
+            self.cycle_sort(ctx);
+            return KeyOutcome::Consumed;
         }
         let State::Ready(ready) = &mut self.state else {
             return KeyOutcome::Ignored;
@@ -482,7 +385,7 @@ impl Component for Results {
                 body,
             ),
             State::Ready(ready) => {
-                let sort = ready.spec.sort.as_ref().map(|(c, d)| (c.as_str(), *d));
+                let sort = ready.spec.sort.as_ref().map(|(i, _, d)| (*i, *d));
                 ready.grid.render(frame, body, ctx, &self.widths, sort);
             }
         }

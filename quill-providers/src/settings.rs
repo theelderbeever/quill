@@ -47,14 +47,3 @@ pub use crate::clickhouse::ClickhouseSettings;
 pub use crate::cassandra::CassandraSettings;
 
 pub use crate::datafusion::DatafusionSettings;
-
-/// Upstream provider parameters, seeded from free-form `params` so typed
-/// fields inserted afterwards take precedence.
-pub(crate) type ProviderParams = std::collections::HashMap<String, secrecy::SecretString>;
-
-pub(crate) fn provider_params(params: &Params) -> ProviderParams {
-    params
-        .iter()
-        .map(|(k, v)| (k.clone(), v.as_str().into()))
-        .collect()
-}
