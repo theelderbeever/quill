@@ -7,15 +7,15 @@ use std::{
 
 use indexmap::IndexMap;
 use quill_core::metadata::TableRef;
-use quill_drivers::{
-    ConnectionPool, PoolFuture,
+use quill_providers::{
+    Connect, ConnectionPool, PoolFuture,
+    cassandra::CassandraConnectionPool,
     clickhouse::ClickhouseConnectionPool,
     datafusion::DatafusionConnectionPool,
     mysql::MysqlConnectionPool,
     postgres::PostgresConnectionPool,
-    scylla::ScyllaConnectionPool,
     settings::{
-        ClickhouseSettings, DatafusionSettings, MysqlSettings, PostgresSettings, ScyllaSettings,
+        CassandraSettings, ClickhouseSettings, DatafusionSettings, MysqlSettings, PostgresSettings,
         SqliteSettings,
     },
     sqlite::SqliteConnectionPool,
@@ -27,6 +27,7 @@ use crate::home::QuillHome;
 use quill_core::error::{Error, Result};
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConnectionsToml {
     #[serde(default)]
     connection: IndexMap<String, Connection>,
@@ -50,7 +51,8 @@ pub enum ConnectionSettings {
     Mysql(MysqlSettings),
     Sqlite(SqliteSettings),
     Clickhouse(ClickhouseSettings),
-    Scylla(ScyllaSettings),
+    #[serde(alias = "scylla")]
+    Cassandra(CassandraSettings),
 }
 
 impl ConnectionSettings {
@@ -62,7 +64,7 @@ impl ConnectionSettings {
             Self::Mysql(_) => "mysql",
             Self::Sqlite(_) => "sqlite",
             Self::Clickhouse(_) => "clickhouse",
-            Self::Scylla(_) => "scylla",
+            Self::Cassandra(_) => "cassandra",
         }
     }
 
@@ -73,11 +75,11 @@ impl ConnectionSettings {
             Self::Postgres(settings) => Some(settings.user.as_str()),
             Self::Mysql(settings) => Some(settings.user.as_str()),
             Self::Clickhouse(settings) => settings.user.as_deref(),
-            Self::Scylla(settings) => settings.user.as_deref(),
+            Self::Cassandra(settings) => settings.user.as_deref(),
         }
     }
 
-    /// Where the data lives: the server, the Scylla nodes, or DataFusion's
+    /// Where the data lives: the server, the Cassandra nodes, or DataFusion's
     /// object stores.
     pub fn host(&self) -> Option<Cow<'_, str>> {
         match self {
@@ -85,19 +87,19 @@ impl ConnectionSettings {
             Self::Postgres(s) => Some(Cow::Owned(format!("{}:{}", s.host, s.port))),
             Self::Mysql(s) => Some(Cow::Owned(format!("{}:{}", s.host, s.port))),
             Self::Clickhouse(s) => Some(Cow::Borrowed(&s.host)),
-            Self::Scylla(s) => listed(s.nodes.iter().map(String::as_str)),
+            Self::Cassandra(s) => listed(s.nodes.iter().map(String::as_str)),
             Self::Datafusion(s) => listed(s.object_stores.iter().map(|o| o.provider.location())),
         }
     }
 
-    /// The database, or its equivalent: Scylla's keyspace, SQLite's file.
+    /// The database, or its equivalent: Cassandra's keyspace, SQLite's file.
     pub fn database(&self) -> Option<&str> {
         match self {
             Self::Datafusion(_) => None,
             Self::Postgres(s) => Some(&s.database),
             Self::Mysql(s) => Some(&s.database),
             Self::Clickhouse(s) => Some(&s.database),
-            Self::Scylla(s) => s.keyspace.as_deref(),
+            Self::Cassandra(s) => s.keyspace.as_deref(),
             Self::Sqlite(s) => s.path.to_str(),
         }
     }
@@ -109,14 +111,16 @@ impl ConnectionSettings {
             Self::Mysql(s) => Arc::new(MysqlConnectionPool::connect(s).await?),
             Self::Sqlite(s) => Arc::new(SqliteConnectionPool::connect(s).await?),
             Self::Clickhouse(s) => Arc::new(ClickhouseConnectionPool::connect(s).await?),
-            Self::Scylla(s) => Arc::new(ScyllaConnectionPool::connect(s).await?),
+            Self::Cassandra(s) => Arc::new(CassandraConnectionPool::connect(s).await?),
         })
     }
 }
 
 /// A connection with its query directory resolved against its file.
 /// The first of `items`, with a count of the rest; `None` when empty.
-fn listed<'a>(mut items: impl ExactSizeIterator<Item = &'a str>) -> Option<Cow<'a, str>> {
+pub(crate) fn listed<'a>(
+    mut items: impl ExactSizeIterator<Item = &'a str>,
+) -> Option<Cow<'a, str>> {
     let rest = items.len().checked_sub(1)?;
     let first = items.next()?;
     Some(match rest {
@@ -275,7 +279,7 @@ mod tests {
             kind = "sqlite"
             path = "/tmp/app.db"
             [connection.cass]
-            kind = "scylla"
+            kind = "cassandra"
             nodes = ["a:9042", "b:9042", "c:9042"]
             keyspace = "events"
             [connection.lake]
@@ -337,6 +341,32 @@ mod tests {
             project_dir.join("sql")
         );
         assert_eq!(project_group.connections[1].1.kind(), "sqlite");
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connections.toml");
+        std::fs::write(
+            &path,
+            "[connection.a]\nkind = \"sqlite\"\npath = \":memory:\"\n\
+             [workspace.w]\nconnections = [\"a\"]\n",
+        )
+        .unwrap();
+        let Err(error) = ConnectionFile::load(&path) else {
+            panic!("`workspace` must be rejected");
+        };
+        assert!(
+            error.to_string().contains("unknown field `workspace`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn repository_dev_config_loads() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.quill.toml");
+        let file = ConnectionFile::load(&path).unwrap().unwrap();
+        assert!(!file.connections.is_empty());
     }
 
     #[test]

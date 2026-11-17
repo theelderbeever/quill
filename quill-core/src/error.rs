@@ -2,6 +2,9 @@ use thiserror::Error;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// Any driver's own error, kept whole so its source chain survives.
+pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("query execution failed")]
@@ -23,14 +26,14 @@ pub enum Error {
     DriverConnect {
         connection: String,
         #[source]
-        source: anyhow::Error,
+        source: BoxError,
     },
 
     #[error("driver execute failed")]
-    DriverExecute(#[source] anyhow::Error),
+    DriverExecute(#[source] BoxError),
 
-    #[error("federation")]
-    Federation(#[source] anyhow::Error),
+    #[error("table {schema}.{table} not found")]
+    TableNotFound { schema: String, table: String },
 
     #[error("gui channel closed")]
     GuiChannel,

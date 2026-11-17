@@ -14,8 +14,8 @@ hooks = [
 repo = "https://github.com/tombi-toml/tombi-pre-commit"
 rev = "v1.2.10"
 hooks = [
-  { id = "tombi-format", exclude = '^Cargo\.lock$' },
-  { id = "tombi-lint", exclude = '^Cargo\.lock$' },
+  { id = "tombi-format", exclude = '^(Cargo\.lock$|forks/)' },
+  { id = "tombi-lint", exclude = '^(Cargo\.lock$|forks/)' },
 ]
 
 [[repos]]

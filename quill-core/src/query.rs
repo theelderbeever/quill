@@ -98,19 +98,19 @@ impl QueryRequest {
     }
 }
 
-/// Events are ordered: schema, zero or more batches, then result-set completion.
+/// Events are ordered: columns, zero or more row batches, then result-set completion.
 /// Each result set has a zero-based index, allowing multiple sets per query.
-/// A rowless statement emits `ResultSetComplete` without a schema or batches.
+/// A rowless statement emits `ResultSetComplete` without columns or rows.
 /// `Complete` terminates successful execution; an error terminates failed execution.
 #[derive(Debug)]
 pub enum QueryEvent {
-    Schema {
+    Columns {
         result_set: usize,
-        schema: arrow::datatypes::SchemaRef,
+        columns: std::sync::Arc<[crate::value::Column]>,
     },
-    Batch {
+    Rows {
         result_set: usize,
-        batch: arrow::record_batch::RecordBatch,
+        batch: crate::value::RowBatch,
     },
     ResultSetComplete {
         result_set: usize,

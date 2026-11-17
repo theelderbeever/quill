@@ -1,15 +1,12 @@
 //! The results panel: progress while running, then a paged grid that can be
-//! sorted, filtered and saved.
+//! sorted.
 mod columns;
 mod grid;
-mod inspector;
 mod page;
 
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
-use datafusion::prelude::SessionContext;
-use quill_io::feather::{FeatherTable, ROW_COLUMN, StoredQuery, StoredResult, Truncation};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -20,25 +17,25 @@ use ratatui::{
 use crate::{
     action::Action,
     component::{Component, Context, KeyHint, KeyOutcome},
-    connection::{error_chain, quote},
+    connection::error_chain,
     format,
-    task::{RunId, derive, page::Page, run::ResultDir, stats},
-    widget::{palette::Flash, panel, theme},
+    result::{Collected, ResultTable, Truncation},
+    task::{RunId, derive, page::Page, stats},
+    widget::{
+        inspector::{self, Inspector, InspectorOutcome},
+        palette::Flash,
+        panel, theme,
+    },
 };
 use columns::Widths;
 use grid::{Grid, GridOutcome};
-use inspector::{Inspector, InspectorOutcome};
 
 const GRID_HINTS: &[KeyHint] = &[
     KeyHint::new("enter", "inspect"),
     KeyHint::new("y", "copy cell"),
     KeyHint::new("s", "sort"),
-    KeyHint::new("/", "where"),
     KeyHint::new("-/+/=", "width"),
 ];
-/// Name the run's own result is registered under for views and profiling.
-const BASE: &str = "base";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Ascending,
@@ -46,13 +43,6 @@ pub enum Direction {
 }
 
 impl Direction {
-    const fn sql(self) -> &'static str {
-        match self {
-            Self::Ascending => "ASC",
-            Self::Descending => "DESC",
-        }
-    }
-
     pub const fn arrow(self) -> &'static str {
         match self {
             Self::Ascending => "▲",
@@ -64,62 +54,30 @@ impl Direction {
 /// The run's own result, which views are derived from.
 struct Base {
     run: RunId,
-    result: Arc<StoredResult>,
-    ctx: SessionContext,
-    columns: Vec<String>,
-    dir: ResultDir,
+    table: Arc<ResultTable>,
 }
 
 impl Base {
-    fn new(run: RunId, result: StoredResult, dir: ResultDir) -> anyhow::Result<Self> {
-        let result = Arc::new(result);
-        let columns = result
-            .schema()
-            .fields()
-            .iter()
-            .map(|f| f.name().clone())
-            .collect();
-        let ctx = SessionContext::new();
-        ctx.register_table(BASE, Arc::new(FeatherTable::new(result.clone())?))?;
-        Ok(Self {
+    fn new(run: RunId, table: ResultTable) -> Self {
+        Self {
             run,
-            result,
-            ctx,
-            columns,
-            dir,
-        })
-    }
-
-    fn select_list(&self) -> String {
-        let quoted: Vec<String> = self.columns.iter().map(|c| quote(c, '"')).collect();
-        quoted.join(", ")
+            table: Arc::new(table),
+        }
     }
 }
 
-/// How the shown rows differ from the base result.
+/// How the shown rows differ from the base result: a sort column, by
+/// index and name, and its direction.
 #[derive(Default)]
 struct ViewSpec {
-    filter: Option<String>,
-    sort: Option<(String, Direction)>,
+    sort: Option<(usize, String, Direction)>,
 }
 
 impl ViewSpec {
-    const fn is_plain(&self) -> bool {
-        self.filter.is_none() && self.sort.is_none()
-    }
-
     fn describe(&self) -> Option<String> {
-        let parts: Vec<String> = self
-            .filter
-            .iter()
-            .map(|f| format!("where {f}"))
-            .chain(
-                self.sort
-                    .iter()
-                    .map(|(c, d)| format!("sort {c} {}", d.arrow())),
-            )
-            .collect();
-        (!parts.is_empty()).then(|| parts.join(" · "))
+        self.sort
+            .as_ref()
+            .map(|(_, c, d)| format!("sort {c} {}", d.arrow()))
     }
 }
 
@@ -127,7 +85,7 @@ struct Ready {
     base: Base,
     spec: ViewSpec,
     grid: Grid,
-    /// View being drained; a result for any other is stale.
+    /// View being collected; a result for any other is stale.
     pending: Option<RunId>,
 }
 
@@ -179,24 +137,9 @@ impl Results {
         matches!(self.state, State::Ready(_))
     }
 
-    /// The current results condition, to edit in the palette.
-    pub fn filter(&self) -> &str {
-        match &self.state {
-            State::Ready(ready) => ready.spec.filter.as_deref().unwrap_or(""),
-            _ => "",
-        }
-    }
-
     /// Show a finished run and start profiling it. The last result set
     /// holding rows is shown.
-    pub fn finish(
-        &mut self,
-        run: RunId,
-        dir: &Path,
-        result: anyhow::Result<StoredQuery>,
-        ctx: &Context,
-    ) {
-        let dir = ResultDir::new(dir.to_path_buf());
+    pub fn finish(&mut self, run: RunId, result: anyhow::Result<Collected>, ctx: &Context) {
         let stored = match result {
             Ok(stored) => stored,
             Err(e) => {
@@ -218,9 +161,6 @@ impl Results {
             .find_map(|(i, set)| set.data.map(|data| (i, data)));
         self.banner = stored.truncation.as_ref().map(|t| match t {
             Truncation::Cancelled => "cancelled; showing rows received before cancelling".into(),
-            Truncation::ByteLimit => {
-                "stopped at the results byte limit; showing rows written so far".into()
-            }
             Truncation::Failed(e) => format!(
                 "failed: {}; showing rows received before the error",
                 error_chain(e)
@@ -230,15 +170,11 @@ impl Results {
         self.state = match (shown, stored.truncation) {
             (Some((index, data)), _) => {
                 self.set = (count > 1).then_some((index + 1, count));
-                match Self::ready(run, data, dir, ctx) {
-                    Ok(mut ready) => {
-                        if let State::Ready(old) = &previous {
-                            ready.grid.follow(&old.grid);
-                        }
-                        State::Ready(Box::new(ready))
-                    }
-                    Err(e) => State::Failed(format!("{e:#}")),
+                let mut ready = Self::ready(run, data, ctx);
+                if let State::Ready(old) = &previous {
+                    ready.grid.follow(&old.grid);
                 }
+                State::Ready(Box::new(ready))
             }
             (None, Some(Truncation::Failed(e))) => {
                 self.banner = None;
@@ -251,104 +187,64 @@ impl Results {
         };
     }
 
-    fn ready(
-        run: RunId,
-        data: StoredResult,
-        dir: ResultDir,
-        ctx: &Context,
-    ) -> anyhow::Result<Ready> {
-        let base = Base::new(run, data, dir)?;
-        let schema = base.result.schema().clone();
-        stats::spawn_profile(
-            base.ctx.clone(),
-            BASE,
-            schema,
-            run,
-            ctx.shared.messages.clone(),
-        );
+    fn ready(run: RunId, data: ResultTable, ctx: &Context) -> Ready {
+        let base = Base::new(run, data);
+        stats::spawn_profile(base.table.clone(), run, ctx.shared.messages.clone());
         let page_rows = ctx.options().page_rows.get();
-        let grid = Grid::new(run, base.result.clone(), None, page_rows)?;
-        Ok(Ready {
+        let grid = Grid::new(run, base.table.clone(), page_rows);
+        Ready {
             base,
             spec: ViewSpec::default(),
             grid,
             pending: None,
-        })
+        }
     }
 
     /// Re-derive the shown rows after the view spec changed.
-    fn derive(ready: &mut Ready, ctx: &Context) -> anyhow::Result<()> {
-        if ready.spec.is_plain() {
+    fn derive(ready: &mut Ready, ctx: &Context) {
+        let Some((column, _, direction)) = &ready.spec.sort else {
             let page_rows = ctx.options().page_rows.get();
-            let grid = Grid::new(ready.base.run, ready.base.result.clone(), None, page_rows)?;
+            let grid = Grid::new(ready.base.run, ready.base.table.clone(), page_rows);
             let previous = std::mem::replace(&mut ready.grid, grid);
             ready.grid.follow(&previous);
             ready.pending = None;
-            return Ok(());
-        }
-        let mut sql = format!("SELECT {} FROM {BASE}", ready.base.select_list());
-        if let Some(filter) = &ready.spec.filter {
-            sql.push_str(&format!(" WHERE {filter}"));
-        }
-        match &ready.spec.sort {
-            Some((column, direction)) => {
-                sql.push_str(&format!(
-                    " ORDER BY {} {}",
-                    quote(column, '"'),
-                    direction.sql()
-                ));
-            }
-            // Keep the original order for a filter alone.
-            None => sql.push_str(&format!(" ORDER BY {ROW_COLUMN}")),
-        }
+            return;
+        };
         let view = RunId::next();
         ready.pending = Some(view);
-        let dir = ready.base.dir.path().join(format!("view-{view}"));
-        let messages = ctx.shared.messages.clone();
         derive::spawn_view(
-            ready.base.ctx.clone(),
-            sql,
-            dir,
+            ready.base.table.clone(),
+            *column,
+            *direction == Direction::Descending,
             ready.base.run,
             view,
-            messages,
+            ctx.shared.messages.clone(),
         );
-        Ok(())
-    }
-
-    /// Apply a SQL condition to the shown rows; empty clears it.
-    pub fn set_filter(&mut self, filter: String, ctx: &Context) -> Option<Flash> {
-        let State::Ready(ready) = &mut self.state else {
-            return Some(Flash::Error("no results to filter".into()));
-        };
-        ready.spec.filter = (!filter.is_empty()).then_some(filter);
-        Self::derive(ready, ctx)
-            .err()
-            .map(|e| Flash::Error(format!("{e:#}")))
     }
 
     /// Ascending, then descending, then unsorted, on the cursor's column.
-    fn cycle_sort(&mut self, ctx: &Context) -> anyhow::Result<()> {
+    fn cycle_sort(&mut self, ctx: &Context) {
         let State::Ready(ready) = &mut self.state else {
-            return Ok(());
+            return;
         };
-        let Some(column) = ready.grid.column().map(str::to_owned) else {
-            return Ok(());
+        let Some((index, column)) = ready.grid.column() else {
+            return;
         };
+        let column = column.to_owned();
         ready.spec.sort = match ready.spec.sort.take() {
-            Some((c, Direction::Ascending)) if c == column => Some((c, Direction::Descending)),
-            Some((c, Direction::Descending)) if c == column => None,
-            _ => Some((column, Direction::Ascending)),
+            Some((i, c, Direction::Ascending)) if i == index => Some((i, c, Direction::Descending)),
+            Some((i, _, Direction::Descending)) if i == index => None,
+            _ => Some((index, column, Direction::Ascending)),
         };
-        Self::derive(ready, ctx)
+        Self::derive(ready, ctx);
     }
 
-    /// A sorted or filtered view finished draining.
+    /// A sorted view finished.
     pub fn derived(
         &mut self,
         base: RunId,
         view: RunId,
-        result: anyhow::Result<StoredQuery>,
+        result: anyhow::Result<ResultTable>,
         ctx: &Context,
     ) -> Option<Flash> {
         let State::Ready(ready) = &mut self.state else {
@@ -358,44 +254,14 @@ impl Results {
             return None;
         }
         ready.pending = None;
-        let dir = ResultDir::new(ready.base.dir.path().join(format!("view-{view}")));
-        let data = match result {
-            Ok(mut stored) => match stored.truncation {
-                Some(Truncation::Failed(e)) => return Some(Flash::Error(error_chain(&e))),
-                _ => stored.result_sets.pop().and_then(|set| set.data),
-            },
+        let table = match result {
+            Ok(table) => table,
             Err(e) => return Some(Flash::Error(format!("{e:#}"))),
         };
-        let data = data?;
         let page_rows = ctx.options().page_rows.get();
-        match Grid::new(view, Arc::new(data), Some(dir), page_rows) {
-            Ok(grid) => {
-                let previous = std::mem::replace(&mut ready.grid, grid);
-                ready.grid.follow(&previous);
-                None
-            }
-            Err(e) => Some(Flash::Error(format!("{e:#}"))),
-        }
-    }
-
-    /// Export the shown rows, in their shown order, to `path`.
-    pub fn save(&self, path: &Path, ctx: &Context) -> Option<Flash> {
-        let State::Ready(ready) = &self.state else {
-            return Some(Flash::Error("no results to save".into()));
-        };
-        let target = path.to_string_lossy().replace('\'', "''");
-        let sql = format!(
-            "COPY (SELECT {} FROM {} ORDER BY {ROW_COLUMN}) TO '{target}'",
-            ready.base.select_list(),
-            crate::task::page::TABLE,
-        );
-        let messages = ctx.shared.messages.clone();
-        derive::spawn_save(
-            ready.grid.context().clone(),
-            sql,
-            path.to_path_buf(),
-            messages,
-        );
+        let grid = Grid::new(view, Arc::new(table), page_rows);
+        let previous = std::mem::replace(&mut ready.grid, grid);
+        ready.grid.follow(&previous);
         None
     }
 
@@ -471,10 +337,8 @@ impl Component for Results {
             });
         }
         if key.code == KeyCode::Char('s') && self.has_grid() {
-            return match self.cycle_sort(ctx) {
-                Ok(()) => KeyOutcome::Consumed,
-                Err(e) => KeyOutcome::Action(Action::Report(format!("{e:#}"))),
-            };
+            self.cycle_sort(ctx);
+            return KeyOutcome::Consumed;
         }
         let State::Ready(ready) = &mut self.state else {
             return KeyOutcome::Ignored;
@@ -521,7 +385,7 @@ impl Component for Results {
                 body,
             ),
             State::Ready(ready) => {
-                let sort = ready.spec.sort.as_ref().map(|(c, d)| (c.as_str(), *d));
+                let sort = ready.spec.sort.as_ref().map(|(i, _, d)| (*i, *d));
                 ready.grid.render(frame, body, ctx, &self.widths, sort);
             }
         }

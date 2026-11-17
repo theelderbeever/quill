@@ -70,6 +70,12 @@ impl QueryTab {
         Ok(())
     }
 
+    /// Pick up the saved text if another editor changed it. Returns false
+    /// when unsaved edits here were kept over it.
+    pub fn reload(&mut self, store: &QueryStore) -> anyhow::Result<bool> {
+        Ok(self.editor.reload(store.read(&self.query)?))
+    }
+
     pub fn start_run(&mut self, connection: &ConnectionId, ctx: &Context) -> KeyOutcome {
         let report = |message: String| KeyOutcome::Action(Action::Report(message));
         if self.run.is_some() {
@@ -86,13 +92,7 @@ impl QueryTab {
         if sql.trim().is_empty() {
             return report("nothing to run".into());
         }
-        let run = Run::start(
-            pool,
-            sql,
-            &ctx.shared.results_dir,
-            ctx.options().byte_limit,
-            ctx.shared.messages.clone(),
-        );
+        let run = Run::start(pool, sql, ctx.shared.messages.clone());
         self.stats.started(run.id());
         self.run = Some(run);
         self.results.running();
@@ -120,10 +120,10 @@ impl QueryTab {
                 if self.run.as_ref().is_some_and(|r| r.id() == run)
                     && let Some(finished) = self.run.take()
                 {
-                    let (client, sink) = finished.metrics();
+                    let (client, received) = finished.metrics();
                     let pool = ctx.connections().pool(connection);
                     let lookup = finished.query().zip(pool);
-                    self.stats.finished(run, client, sink, lookup.is_some());
+                    self.stats.finished(run, client, received, lookup.is_some());
                     if let Some((query, pool)) = lookup {
                         stats_task::spawn_server_metrics(
                             pool,
@@ -132,7 +132,7 @@ impl QueryTab {
                             ctx.shared.messages.clone(),
                         );
                     }
-                    self.results.finish(run, finished.dir(), result, ctx);
+                    self.results.finish(run, result, ctx);
                 }
             }
             RunMsg::Page { run, index, result } => return self.results.page(run, index, result),
@@ -141,25 +141,19 @@ impl QueryTab {
             RunMsg::Derived { base, view, result } => {
                 return self.results.derived(base, view, result, ctx);
             }
-            RunMsg::Saved { path, result } => {
-                return Some(match result {
-                    Ok(()) => Flash::Info(format!("saved {}", path.display())),
-                    Err(e) => Flash::Error(format!("save failed: {e:#}")),
-                });
-            }
         }
         None
     }
 
     /// Run progress, shown on the palette line.
     pub fn status(&self) -> Option<Line<'_>> {
-        let (sink, elapsed) = self.run.as_ref()?.progress();
+        let (received, elapsed) = self.run.as_ref()?.progress();
         Some(Line::from(vec![
             Span::styled("running ", theme::PENDING),
             Span::raw(format!(
                 "{} rows · {} · {}",
-                format::count(sink.rows_written),
-                format::bytes(sink.bytes_written),
+                format::count(received.rows),
+                format::bytes(received.bytes),
                 format::duration(elapsed),
             )),
             Span::styled("  esc cancel", theme::DIM),
@@ -388,24 +382,17 @@ mod tests {
 
     #[tokio::test]
     async fn sync_keeps_a_running_tab() {
-        use quill_drivers::{
-            ConnectionPool, settings::SqliteSettings, sqlite::SqliteConnectionPool,
-        };
+        use quill_providers::{Connect, settings::SqliteSettings, sqlite::SqliteConnectionPool};
         let settings = SqliteSettings {
+            databases: Vec::new(),
             path: ":memory:".into(),
+            busy_timeout_ms: 5000,
             params: Default::default(),
         };
         let pool = SqliteConnectionPool::connect(&settings).await.unwrap();
-        let results = tempfile::tempdir().unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut tabs = three();
-        tabs.active_mut().run = Some(Run::start(
-            std::sync::Arc::new(pool),
-            "SELECT 1".into(),
-            results.path(),
-            None,
-            tx,
-        ));
+        tabs.active_mut().run = Some(Run::start(std::sync::Arc::new(pool), "SELECT 1".into(), tx));
         tabs.sync(&[name("c")], &name("c"), &store()).unwrap();
         assert_eq!(names(&tabs), ["b", "c"]);
     }

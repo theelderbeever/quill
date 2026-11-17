@@ -23,6 +23,7 @@ use crate::{
     },
     widget::{
         header::{self, Header},
+        inspector::{self, Inspector, InspectorOutcome},
         palette::{self, Flash, Palette, PaletteEvent},
     },
 };
@@ -43,6 +44,8 @@ pub struct App {
     /// until their connection is disconnected.
     sessions: HashMap<ConnectionId, Box<Workspace>>,
     palette: Palette,
+    /// Errors, shown over everything until dismissed.
+    error: Option<Inspector>,
     dirty: bool,
     quit: bool,
 }
@@ -56,6 +59,7 @@ impl App {
             views: ViewStack::new(),
             sessions: HashMap::new(),
             palette: Palette::new(),
+            error: None,
             dirty: true,
             quit: false,
         };
@@ -134,13 +138,28 @@ impl App {
     }
 
     fn show(&mut self, flash: Flash) {
-        self.palette.flash(flash);
+        match flash {
+            Flash::Error(message) => match &mut self.error {
+                Some(error) => error.append(&message),
+                None => self.error = Some(Inspector::error(message)),
+            },
+            info => self.palette.flash(info),
+        }
         self.dirty = true;
     }
 
     /// Precedence: open palette, reserved keys, focused view, then fallbacks
     /// the view left unhandled.
     fn handle_key(&mut self, key: KeyEvent) {
+        let quit = key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL;
+        if let Some(error) = self.error.as_mut().filter(|_| !quit) {
+            match error.handle_key(key) {
+                InspectorOutcome::Open => {}
+                InspectorOutcome::Close => self.error = None,
+                InspectorOutcome::Copy(text) => self.copy(text),
+            }
+            return;
+        }
         if self.palette.is_open() {
             match self.palette.handle_key(key) {
                 PaletteEvent::None => {}
@@ -150,16 +169,6 @@ impl App {
                 }
                 PaletteEvent::FilterCancelled => {
                     self.views.top_mut().set_filter(None);
-                }
-                PaletteEvent::Where(text) => {
-                    let ctx = self.shared.context(true);
-                    let flash = match self.views.top_mut() {
-                        View::Workspace(workspace) => workspace.set_filter(text, &ctx),
-                        _ => None,
-                    };
-                    if let Some(flash) = flash {
-                        self.show(flash);
-                    }
                 }
             }
             return;
@@ -183,14 +192,9 @@ impl App {
             KeyOutcome::Ignored if capturing => {}
             KeyOutcome::Ignored => match key.code {
                 KeyCode::Char(':') => self.palette.open(palette::Mode::Command),
-                KeyCode::Char('/') => {
-                    if let Some((mode, text)) = self.views.top().filter_mode() {
-                        let text = text.to_owned();
-                        if mode == palette::Mode::Filter {
-                            self.views.top_mut().set_filter(None);
-                        }
-                        self.palette.open_with(mode, &text);
-                    }
+                KeyCode::Char('/') if self.views.top().filterable() => {
+                    self.views.top_mut().set_filter(None);
+                    self.palette.open(palette::Mode::Filter);
                 }
                 KeyCode::Esc => self.apply(Action::Back),
                 _ => {}
@@ -199,6 +203,14 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if let Some(error) = &self.error {
+            if matches!(mouse.kind, MouseEventKind::Down(_))
+                && !error.contains(mouse.column, mouse.row)
+            {
+                self.error = None;
+            }
+            return;
+        }
         let ctx = self.shared.context(true);
         if let KeyOutcome::Action(action) = self.views.top_mut().handle_mouse(mouse, &ctx) {
             self.apply(action);
@@ -264,16 +276,6 @@ impl App {
             }
             Action::Report(message) => self.report(message),
             Action::Copy(text) => self.copy(text),
-            Action::Save(path) => {
-                let ctx = self.shared.context(true);
-                let flash = match self.views.top() {
-                    View::Workspace(workspace) => workspace.save(&path, &ctx),
-                    _ => Some(Flash::Error("open a query's results to save them".into())),
-                };
-                if let Some(flash) = flash {
-                    self.show(flash);
-                }
-            }
             Action::Quit => self.quit = true,
         }
     }
@@ -368,10 +370,17 @@ impl App {
         let header = Header {
             connections: &self.shared.connections,
             view,
-            hints: [view.hints(), view_hints, GLOBAL_HINTS],
+            hints: if self.error.is_some() {
+                [inspector::HINTS, &[], &[]]
+            } else {
+                [view.hints(), view_hints, GLOBAL_HINTS]
+            },
         };
         frame.render_widget(header, header_area);
         self.palette.render(frame, palette_area, view.status());
+        if let Some(error) = &self.error {
+            error.render(frame, body);
+        }
     }
 }
 
@@ -460,7 +469,19 @@ mod tests {
         type_command(&mut app, "conn pg");
 
         type_command(&mut app, "conn nope");
-        assert!(screen(&mut app, 120).contains("no connection named `nope`"));
+        let shown = screen(&mut app, 120);
+        assert!(shown.contains(" error "));
+        assert!(shown.contains("no connection named `nope`"));
+        app.report("second".into());
+        assert!(screen(&mut app, 120).contains("second"));
+        // The dialog takes keys until it closes.
+        press(&mut app, KeyCode::Esc);
+        assert!(!screen(&mut app, 120).contains(" error "));
+        // Ctrl-C still quits past the dialog.
+        app.report("again".into());
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit());
+        app.quit = false;
 
         type_command(&mut app, "conn");
         type_command(&mut app, "q");
@@ -562,25 +583,24 @@ mod tests {
         done: impl Fn(&str) -> bool,
     ) -> String {
         let deadline = std::time::Duration::from_secs(10);
-        tokio::time::timeout(deadline, async {
+        let mut last = String::new();
+        let waited = tokio::time::timeout(deadline, async {
             loop {
-                let screen = screen(app, 160);
-                if done(&screen) {
-                    return screen;
+                last = screen(app, 160);
+                if done(&last) {
+                    return last.clone();
                 }
                 let msg = rx.recv().await.expect("channel open");
                 app.handle(Event::Msg(msg));
             }
         })
-        .await
-        .expect("condition before timeout")
+        .await;
+        waited.unwrap_or_else(|_| panic!("condition before timeout; last screen:\n{last}"))
     }
 
     #[tokio::test]
     async fn runs_a_query_and_pages_through_the_results() {
-        use quill_drivers::{
-            ConnectionPool, settings::SqliteSettings, sqlite::SqliteConnectionPool,
-        };
+        use quill_providers::{Connect, settings::SqliteSettings, sqlite::SqliteConnectionPool};
 
         let dir = tempfile::tempdir().unwrap();
         let queries = dir.path().join("queries");
@@ -598,14 +618,15 @@ mod tests {
             connections: vec![("lite".into(), source)],
         }]);
         let start = connections.lookup("lite");
-        let (mut shared, mut rx) = shared(connections);
-        shared.results_dir = dir.path().join("results");
+        let (shared, mut rx) = shared(connections);
         let mut app = App::new(shared, start);
 
         // Swap the offline attempt for a real in-memory SQLite pool.
         let lite = id(&app.shared.connections, "lite");
         let settings = SqliteSettings {
+            databases: Vec::new(),
             path: ":memory:".into(),
+            busy_timeout_ms: 5000,
             params: Default::default(),
         };
         let pool = SqliteConnectionPool::connect(&settings).await.unwrap();
@@ -631,7 +652,7 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         assert!(!screen(&mut app, 160).contains("label · row 1000"));
 
-        // Statistics profile the whole result once the drain finishes.
+        // Statistics profile the whole result once collection finishes.
         let stats = pump(&mut app, &mut rx, |s| s.contains("scanned 1,000 rows")).await;
         assert!(stats.contains("nulls"), "{stats}");
 
@@ -650,45 +671,24 @@ mod tests {
             .unwrap_or_default();
         assert!(first_row.contains("row 1000"), "{sorted}");
 
-        // A results condition re-drains just the matching rows.
+        // `/` does not filter results.
         press(&mut app, KeyCode::Char('/'));
-        type_text(&mut app, "x <= 3");
-        press(&mut app, KeyCode::Enter);
-        pump(&mut app, &mut rx, |s| s.contains("results · 3 rows")).await;
+        assert!(!app.palette.is_open());
 
         // The cursor cell's full value is what Ctrl-Shift-C or `y` copies.
-        press(&mut app, KeyCode::Char('g'));
         press(&mut app, KeyCode::Char('l'));
-        pump(&mut app, &mut rx, |s| s.contains("row 3")).await;
-        assert_eq!(app.views.top_mut().copy_text().as_deref(), Some("row 3"));
+        assert_eq!(app.views.top_mut().copy_text().as_deref(), Some("row 1000"));
 
-        let out = dir.path().join("out.csv");
-        type_command(&mut app, &format!("save {}", out.display()));
-        pump(&mut app, &mut rx, |s| s.contains("saved ")).await;
-        let saved = std::fs::read_to_string(&out).unwrap();
-        assert_eq!(
-            saved.lines().collect::<Vec<_>>(),
-            ["x,label", "3,row 3", "2,row 2", "1,row 1"]
-        );
-
-        // Leaving the workspace keeps the run's result files; disconnecting
-        // removes them.
-        let runs = || {
-            std::fs::read_dir(dir.path().join("results"))
-                .unwrap()
-                .count()
-        };
+        // Leaving the workspace keeps the run's result; disconnecting drops it.
         press(&mut app, KeyCode::Esc);
-        assert_eq!(runs(), 1);
+        assert!(app.sessions.contains_key(&lite));
         type_command(&mut app, "disconnect");
-        assert_eq!(runs(), 0);
+        assert!(!app.sessions.contains_key(&lite));
     }
 
     #[tokio::test]
     async fn tabs_keep_their_results_until_disconnect() {
-        use quill_drivers::{
-            ConnectionPool, settings::SqliteSettings, sqlite::SqliteConnectionPool,
-        };
+        use quill_providers::{Connect, settings::SqliteSettings, sqlite::SqliteConnectionPool};
 
         let dir = tempfile::tempdir().unwrap();
         let queries = dir.path().join("queries");
@@ -702,12 +702,13 @@ mod tests {
             connections: vec![("lite".into(), source)],
         }]);
         let start = connections.lookup("lite");
-        let (mut shared, mut rx) = shared(connections);
-        shared.results_dir = dir.path().join("results");
+        let (shared, mut rx) = shared(connections);
         let mut app = App::new(shared, start);
         let lite = id(&app.shared.connections, "lite");
         let settings = SqliteSettings {
+            databases: Vec::new(),
             path: ":memory:".into(),
+            busy_timeout_ms: 5000,
             params: Default::default(),
         };
         let pool = SqliteConnectionPool::connect(&settings).await.unwrap();
@@ -735,22 +736,18 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert!(screen(&mut app, 160).contains("results · 1 rows"));
 
-        let runs = || {
-            std::fs::read_dir(dir.path().join("results"))
-                .unwrap()
-                .count()
-        };
-        assert_eq!(runs(), 1);
+        press(&mut app, KeyCode::Esc);
+        assert!(app.sessions.contains_key(&lite));
         type_command(&mut app, "disconnect");
-        assert_eq!(runs(), 0);
+        assert!(!app.sessions.contains_key(&lite));
     }
 
     #[tokio::test]
     async fn catalog_puts_a_select_into_the_editor() {
         use futures::StreamExt;
         use quill_core::query::QueryRequest;
-        use quill_drivers::{
-            ConnectionPool, settings::SqliteSettings, sqlite::SqliteConnectionPool,
+        use quill_providers::{
+            Connect, ConnectionPool, settings::SqliteSettings, sqlite::SqliteConnectionPool,
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -768,7 +765,9 @@ mod tests {
         let mut app = App::new(shared, start);
 
         let settings = SqliteSettings {
+            databases: Vec::new(),
             path: ":memory:".into(),
+            busy_timeout_ms: 5000,
             params: Default::default(),
         };
         let pool = SqliteConnectionPool::connect(&settings).await.unwrap();

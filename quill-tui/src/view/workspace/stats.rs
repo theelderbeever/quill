@@ -1,8 +1,8 @@
-//! Statistics for the last run: client, sink and server metrics, then a
+//! Statistics for the last run: client, collected and server metrics, then a
 //! profile of each column.
+use crate::result::Received;
 use crossterm::event::{KeyCode, KeyEvent};
 use quill_core::query::{ClientMetrics, ServerMetrics};
-use quill_io::feather::SinkMetrics;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -29,7 +29,7 @@ enum Pending<T> {
 struct RunStats {
     run: RunId,
     client: Option<ClientMetrics>,
-    sink: Option<SinkMetrics>,
+    received: Option<Received>,
     server: Pending<Option<ServerMetrics>>,
     profile: Pending<Profile>,
 }
@@ -52,7 +52,7 @@ impl Stats {
         self.run = Some(RunStats {
             run,
             client: None,
-            sink: None,
+            received: None,
             server: Pending::Waiting,
             profile: Pending::Waiting,
         });
@@ -72,12 +72,12 @@ impl Stats {
         &mut self,
         run: RunId,
         client: Option<ClientMetrics>,
-        sink: SinkMetrics,
+        received: Received,
         server: bool,
     ) {
         if let Some(stats) = self.current(run) {
             stats.client = client;
-            stats.sink = Some(sink);
+            stats.received = Some(received);
             if !server {
                 stats.server = Pending::Ready(None);
             }
@@ -131,13 +131,13 @@ impl Stats {
             }
             None => lines.push(Line::styled(" running…", theme::PENDING)),
         }
-        if let Some(sink) = &stats.sink {
+        if let Some(received) = &stats.received {
             lines.push(item(
-                "stored",
+                "in memory",
                 format!(
                     "{} rows · {}",
-                    format::count(sink.rows_written),
-                    format::bytes(sink.bytes_written)
+                    format::count(received.rows),
+                    format::bytes(received.bytes)
                 ),
             ));
         }

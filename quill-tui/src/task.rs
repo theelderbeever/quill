@@ -4,6 +4,7 @@ pub mod derive;
 pub mod page;
 pub mod run;
 pub mod stats;
+pub mod watch;
 
 use std::sync::{
     Arc,
@@ -11,7 +12,8 @@ use std::sync::{
 };
 
 use quill_core::query::{ExecutionControl, QueryId, ServerMetrics};
-use quill_io::feather::StoredQuery;
+
+use crate::result::{Collected, ResultTable};
 
 /// Identifies one query run, so updates for a superseded run are dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -39,7 +41,7 @@ pub enum RunMsg {
     },
     Finished {
         run: RunId,
-        result: anyhow::Result<StoredQuery>,
+        result: anyhow::Result<Collected>,
     },
     Page {
         run: RunId,
@@ -56,20 +58,16 @@ pub enum RunMsg {
         run: RunId,
         result: quill_core::error::Result<Option<ServerMetrics>>,
     },
-    /// A sorted or filtered view of `base`, drained to disk.
+    /// A sorted view of `base`.
     Derived {
         base: RunId,
         view: RunId,
-        result: anyhow::Result<StoredQuery>,
-    },
-    Saved {
-        path: std::path::PathBuf,
-        result: anyhow::Result<()>,
+        result: anyhow::Result<ResultTable>,
     },
 }
 
 impl RunMsg {
-    /// The run this update belongs to; `None` for one tied to no run.
+    /// The run this update belongs to.
     pub const fn run(&self) -> Option<RunId> {
         match self {
             Self::Started { run, .. }
@@ -78,7 +76,6 @@ impl RunMsg {
             | Self::Profile { run, .. }
             | Self::ServerMetrics { run, .. } => Some(*run),
             Self::Derived { base, .. } => Some(*base),
-            Self::Saved { .. } => None,
         }
     }
 }

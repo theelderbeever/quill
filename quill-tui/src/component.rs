@@ -1,5 +1,4 @@
 //! The shape shared by views and workspace panels.
-use std::path::PathBuf;
 
 use crossterm::event::{KeyEvent, MouseEvent};
 use ratatui::{Frame, layout::Rect};
@@ -30,8 +29,6 @@ pub enum KeyOutcome {
 pub struct Shared {
     pub connections: Connections,
     pub options: Options,
-    /// Per-session directory for drained results, removed on exit.
-    pub results_dir: PathBuf,
     /// Background tasks report back through this.
     pub messages: UnboundedSender<Msg>,
 }
@@ -103,8 +100,6 @@ pub(crate) mod testing {
         Options {
             redraw: Duration::from_millis(100),
             autosave: Duration::from_millis(750),
-            results_dir: std::env::temp_dir(),
-            byte_limit: None,
             page_rows: NonZeroU64::MIN.saturating_add(99),
             max_column_width: 40,
         }
@@ -115,7 +110,6 @@ pub(crate) mod testing {
         let shared = Shared {
             connections,
             options: options(),
-            results_dir: std::env::temp_dir(),
             messages,
         };
         (shared, received)

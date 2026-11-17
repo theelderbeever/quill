@@ -1,6 +1,7 @@
 # Quill
 
-A Rust-native, multi-database SQL editor.
+A Rust-native, multi-database SQL editor. Each connection runs SQL natively on its
+database; DataFusion serves local files and object stores.
 
 ## Testing
 
@@ -25,18 +26,18 @@ just docker --tls
 Wait for the databases to finish starting, then run:
 
 ```sh
-QUILL_TEST_TLS=1 cargo test -p quill-drivers --test metadata -- --ignored
+QUILL_TEST_TLS=1 cargo test -p quill-providers --test metadata -- --ignored
 ```
 
-The tests verify catalog, schema, table, column, and index discovery for Postgres,
-MySQL, ClickHouse, and Scylla, including missing-table errors. They use the local
+The tests verify catalog, schema, table, and column discovery for Postgres, MySQL,
+ClickHouse, and Cassandra (the Compose Scylla service), including missing-table errors. They use the local
 CA in `docker/tls/certs/ca.pem` for the services configured with TLS. Postgres uses
 plaintext in the current Compose setup.
 
-Postgres query execution tests use the same Compose Postgres service:
+Run every database test, including per-driver execution:
 
 ```sh
-cargo test -p quill-drivers --test postgres_execute -- --ignored
+QUILL_TEST_TLS=1 cargo test --no-fail-fast -p quill-providers -- --ignored
 ```
 
 ### Compose without TLS
@@ -50,7 +51,7 @@ just docker
 Wait for the databases to finish starting, then run without `QUILL_TEST_TLS`:
 
 ```sh
-cargo test -p quill-drivers --test metadata -- --ignored
+cargo test -p quill-providers --test metadata -- --ignored
 ```
 
 ### Checks and cleanup
@@ -65,3 +66,28 @@ Stop the development services when finished:
 ```sh
 docker compose -f docker-compose.yaml -f docker-compose.tls.yaml down
 ```
+
+Postgres connections default to `sslmode = "require"`: TLS is required, without
+server certificate verification. Set `sslmode = "verify-ca"` to verify the trust
+chain or `"verify-full"` to also verify the hostname. `"disable"` selects plaintext;
+`"prefer"` allows the driver to fall back to plaintext.
+
+```toml
+[connection.app]
+kind = "postgres"
+host = "db.example.com"
+database = "app"
+user = "app"
+sslmode = "verify-full"
+
+[connection.app.tls]
+ca_cert = "/path/to/ca.pem" # Optional; otherwise use system trust roots.
+
+# Optional client identity for mutual TLS:
+# [connection.app.tls.identity]
+# cert = "/path/to/client.pem"
+# key = "/path/to/client.key"
+```
+
+The typed `sslmode` setting takes precedence over `params.sslmode`. Other providers
+retain their existing TLS defaults.

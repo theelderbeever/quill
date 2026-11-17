@@ -2,8 +2,7 @@
 members = [
   "quill",
   "quill-core",
-  "quill-drivers",
-  "quill-io",
+  "quill-providers",
   "quill-tui",
 ]
 
@@ -16,8 +15,7 @@ rust-version = "1.99"
 
 [workspace.dependencies]
 quill-core = { path = "quill-core" }
-quill-drivers = { path = "quill-drivers" }
-quill-io = { path = "quill-io" }
+quill-providers = { path = "quill-providers" }
 quill-tui = { path = "quill-tui" }
 
 anyhow = "1"
@@ -26,10 +24,8 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 clickhouse = { version = "0.15.3", features = ["native-tls"] }
-clickhouse-ext-arrow = "0.2"
 crossterm = { version = "0.29", features = ["event-stream"] }
 datafusion = "55.2"
-datafusion-table-providers = { version = "0.11", features = ["postgres"] }
 figment = { version = "0.10", features = ["env", "toml"] }
 futures = "0.3"
 indexmap = { version = "2", features = ["serde"] }
@@ -42,16 +38,17 @@ secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = {
-  version = "0.8",
+  version = "0.9",
+  default-features = false,
   features = [
     "bigdecimal",
     "chrono",
-    "derive",
     "json",
-    "macros",
-    "migrate",
+    "mysql",
     "postgres",
-    "runtime-tokio-rustls",
+    "runtime-tokio",
+    "sqlite",
+    "tls-native-tls",
     "uuid",
   ]
 }
@@ -92,6 +89,7 @@ debug = "line-tables-only"
 debug = false
 
 [profile.release]
-strip = "symbols"
-lto = "thin"
-codegen-units = 1
+strip = true
+# lto = true
+panic = "abort"
+# codegen-units = 1

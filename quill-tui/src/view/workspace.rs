@@ -7,7 +7,7 @@ mod results;
 mod stats;
 mod tab;
 
-use std::{ops::Range, path::Path, time::Instant};
+use std::{ops::Range, time::Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
@@ -22,6 +22,7 @@ use crate::{
     connection::ConnectionId,
     event::Msg,
     store::queries::{QueryName, QueryStore},
+    task::watch::QueryWatch,
     widget::{
         input::{InputEvent, TextInput},
         palette::Flash,
@@ -92,6 +93,7 @@ pub struct Workspace {
     tab_hits: Vec<(Range<u16>, usize)>,
     prompt: Option<Prompt>,
     catalog: Catalog,
+    _watch: QueryWatch,
 }
 
 impl Workspace {
@@ -110,11 +112,15 @@ impl Workspace {
         let store = QueryStore::new(ctx.connections().query_dir(&connection));
         let mut tabs = Tabs::new(QueryTab::open(query.clone(), &store)?);
         tabs.sync(&store.list()?, &query, &store)?;
-        Ok(Self::new(connection, store, tabs))
+        store.ensure_dir()?;
+        let watch =
+            QueryWatch::start(store.dir(), connection.clone(), ctx.shared.messages.clone())?;
+        Ok(Self::new(connection, store, tabs, watch))
     }
 
-    fn new(connection: ConnectionId, store: QueryStore, tabs: Tabs) -> Self {
+    fn new(connection: ConnectionId, store: QueryStore, tabs: Tabs, watch: QueryWatch) -> Self {
         Self {
+            _watch: watch,
             catalog: Catalog::new(connection.clone()),
             connection,
             store,
@@ -166,6 +172,7 @@ impl Workspace {
     pub fn owns(&self, msg: &Msg) -> bool {
         match msg {
             Msg::Catalog(msg) => msg.connection == self.connection,
+            Msg::Queries(msg) => msg.connection == self.connection,
             Msg::Run(msg) => msg
                 .run()
                 .is_none_or(|run| self.tabs.iter().any(|t| t.owns(run))),
@@ -187,23 +194,29 @@ impl Workspace {
                 };
                 tab.handle_msg(msg, &self.connection, ctx)
             }
+            Msg::Queries(_) => self
+                .refresh()
+                .unwrap_or_else(|e| Some(Flash::Error(format!("{e:#}")))),
             Msg::Connected { .. } => None,
         }
     }
 
-    /// Whether `/` should edit a results condition: the results have focus
-    /// and hold rows. Returns the current condition.
-    pub fn filter(&self) -> Option<&str> {
-        let results = &self.tabs.active().results;
-        (self.focus == Panel::Results && results.has_grid()).then(|| results.filter())
-    }
-
-    pub fn set_filter(&mut self, filter: String, ctx: &Context) -> Option<Flash> {
-        self.tabs.active_mut().results.set_filter(filter, ctx)
-    }
-
-    pub fn save(&self, path: &Path, ctx: &Context) -> Option<Flash> {
-        self.tabs.active().results.save(path, ctx)
+    /// Follow queries changed on disk, keeping unsaved edits.
+    fn refresh(&mut self) -> anyhow::Result<Option<Flash>> {
+        let active = self.query().clone();
+        self.tabs.sync(&self.store.list()?, &active, &self.store)?;
+        let mut kept = Vec::new();
+        for tab in self.tabs.iter_mut() {
+            if !tab.reload(&self.store)? {
+                kept.push(tab.query().as_str());
+            }
+        }
+        Ok((!kept.is_empty()).then(|| {
+            Flash::Error(format!(
+                "{} changed on disk; unsaved edits here will overwrite it",
+                kept.join(", ")
+            ))
+        }))
     }
 
     /// The active tab's run progress, shown on the palette line.
@@ -488,6 +501,12 @@ impl Component for Workspace {
 mod tests {
     use super::*;
     use crate::connection::testing::{connections, id};
+    use std::path::Path;
+
+    fn watch(dir: &Path) -> QueryWatch {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        QueryWatch::start(dir, id(&connections(&["a"]), "a"), tx).unwrap()
+    }
 
     fn workspace(width: u16) -> Workspace {
         let connections = connections(&["a"]);
@@ -495,7 +514,8 @@ mod tests {
         let names = ["a", "b", "c", "d"].map(|n| QueryName::parse(n).unwrap());
         let mut tabs = Tabs::new(QueryTab::open(names[0].clone(), &store).unwrap());
         tabs.sync(&names, &names[0], &store).unwrap();
-        let mut workspace = Workspace::new(id(&connections, "a"), store, tabs);
+        let watch = watch(&std::env::temp_dir());
+        let mut workspace = Workspace::new(id(&connections, "a"), store, tabs, watch);
         workspace.width = width;
         workspace
     }
@@ -548,7 +568,7 @@ mod tests {
         let only = QueryName::parse("only").unwrap();
         store.create(&only).unwrap();
         let tabs = Tabs::new(QueryTab::open(only, &store).unwrap());
-        let mut workspace = Workspace::new(id(&connections, "a"), store, tabs);
+        let mut workspace = Workspace::new(id(&connections, "a"), store, tabs, watch(dir.path()));
         let (shared, _rx) = crate::component::testing::shared(connections);
         let ctx = shared.context(true);
 
@@ -686,5 +706,45 @@ mod tests {
             workspace.handle_key(e, &ctx);
             assert!(workspace.captures_input());
         }
+    }
+
+    #[test]
+    fn refresh_follows_disk_but_keeps_unsaved_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let connections = connections(&["a"]);
+        let store = QueryStore::new(dir.path());
+        let (one, two) = (
+            QueryName::parse("one").unwrap(),
+            QueryName::parse("two").unwrap(),
+        );
+        store.write(&one, "SELECT 1").unwrap();
+        store.write(&two, "SELECT 2").unwrap();
+        let mut tabs = Tabs::new(QueryTab::open(one.clone(), &store).unwrap());
+        tabs.sync(&store.list().unwrap(), &one, &store).unwrap();
+        let mut workspace = Workspace::new(id(&connections, "a"), store, tabs, watch(dir.path()));
+        let (shared, _rx) = crate::component::testing::shared(connections);
+        let ctx = shared.context(true);
+
+        press(&mut workspace, KeyCode::Char('e'), &ctx);
+        press(&mut workspace, KeyCode::Char('x'), &ctx);
+        workspace.store.write(&one, "SELECT 10").unwrap();
+        workspace.store.write(&two, "SELECT 20").unwrap();
+        workspace
+            .store
+            .write(&QueryName::parse("three").unwrap(), "SELECT 3")
+            .unwrap();
+
+        let flash = workspace.refresh().unwrap();
+        assert!(matches!(flash, Some(Flash::Error(m)) if m.starts_with("one changed")));
+        let texts: Vec<_> = workspace
+            .tabs
+            .iter_mut()
+            .map(|t| (t.query().to_string(), t.editor.unsaved()))
+            .collect();
+        assert_eq!(texts[0].0, "one");
+        assert!(texts[0].1.is_some());
+        assert_eq!(texts[1], ("three".into(), None));
+        assert_eq!(texts[2], ("two".into(), None));
+        assert_eq!(workspace.store.read(&two).unwrap(), "SELECT 20");
     }
 }

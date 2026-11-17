@@ -11,8 +11,6 @@ pub enum Command {
     Conn(Option<Target>),
     /// `:disconnect [name]` closes the named or current connection.
     Disconnect(Option<ConnectionId>),
-    /// `:save <path>` exports the shown result; the extension picks the format.
-    Save(std::path::PathBuf),
     Quit,
 }
 
@@ -20,8 +18,6 @@ pub enum Command {
 pub enum CommandError {
     #[error("no connection is open here; name one")]
     NoConnection,
-    #[error("invalid save path: {0}")]
-    SavePath(String),
     #[error("type a command")]
     Empty,
     #[error("unknown command `{0}`")]
@@ -30,8 +26,6 @@ pub enum CommandError {
     UnknownConnection(String),
     #[error("several connections are named `{0}`; use x in the connection list")]
     AmbiguousConnection(String),
-    #[error("`{0}` needs an argument")]
-    MissingArgument(String),
     #[error("too many arguments for `{0}`")]
     TooManyArguments(String),
 }
@@ -57,16 +51,6 @@ impl Command {
                     })
                     .transpose()?,
             ),
-            // The rest of the line, so paths may contain spaces.
-            "save" | "w" => {
-                let path = input.trim_start()[name.len()..].trim();
-                if path.is_empty() {
-                    return Err(CommandError::MissingArgument(name.to_owned()));
-                }
-                return Ok(Self::Save(
-                    crate::path::SavePath::expand(path).map_err(CommandError::SavePath)?,
-                ));
-            }
             "q" | "quit" => Self::Quit,
             other => return Err(CommandError::Unknown(other.to_owned())),
         };
@@ -84,7 +68,6 @@ impl Command {
                 id.or_else(|| current.cloned())
                     .ok_or(CommandError::NoConnection)?,
             ),
-            Self::Save(path) => Action::Save(path),
             Self::Quit => Action::Quit,
         })
     }
@@ -112,14 +95,6 @@ mod tests {
         assert_eq!(parse("quit"), Ok(Command::Quit));
         assert_eq!(parse("close"), Ok(Command::Disconnect(None)));
         assert_eq!(parse("disconnect pg"), Ok(Command::Disconnect(Some(pg))));
-        assert_eq!(
-            parse("save out/my result.csv"),
-            Ok(Command::Save("out/my result.csv".into()))
-        );
-        assert_eq!(
-            parse("save"),
-            Err(CommandError::MissingArgument("save".into()))
-        );
     }
 
     #[test]

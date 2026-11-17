@@ -8,7 +8,7 @@ use std::{
 
 use indexmap::IndexMap;
 use quill_core::{error::Result, metadata::TableRef};
-use quill_drivers::{ConnectionPool, PoolFuture};
+use quill_providers::{ConnectionPool, PoolFuture};
 
 use crate::filter::Filter;
 
@@ -18,7 +18,7 @@ use crate::filter::Filter;
 /// ```
 /// use std::{path::Path, sync::Arc};
 /// use quill_core::error::Error;
-/// use quill_drivers::{ConnectionPool, PoolFuture};
+/// use quill_providers::{ConnectionPool, PoolFuture};
 /// use quill_tui::ConnectionSource;
 ///
 /// struct Offline;
@@ -117,10 +117,15 @@ pub enum Target {
     Many(Filter),
 }
 
+/// A connected session. Dropping it closes the pool.
+pub struct Session {
+    pub pool: Arc<dyn ConnectionPool>,
+}
+
 pub enum ConnectionState {
     Idle,
     Connecting,
-    Connected(Arc<dyn ConnectionPool>),
+    Connected(Session),
     /// The error and its sources, formatted once when the attempt failed.
     Failed(String),
 }
@@ -146,7 +151,7 @@ struct Entry {
 /// ```
 /// # use std::{path::Path, sync::Arc};
 /// # use quill_core::error::Error;
-/// # use quill_drivers::{ConnectionPool, PoolFuture};
+/// # use quill_providers::{ConnectionPool, PoolFuture};
 /// # use quill_tui::{ConnectionGroup, ConnectionSource, Connections, Target};
 /// # struct Offline;
 /// # impl ConnectionSource for Offline {
@@ -260,7 +265,7 @@ impl Connections {
 
     pub(crate) fn pool(&self, id: &ConnectionId) -> Option<Arc<dyn ConnectionPool>> {
         match self.state(id)? {
-            ConnectionState::Connected(pool) => Some(pool.clone()),
+            ConnectionState::Connected(session) => Some(session.pool.clone()),
             _ => None,
         }
     }
@@ -300,7 +305,7 @@ impl Connections {
             return;
         }
         entry.state = match result {
-            Ok(pool) => ConnectionState::Connected(pool),
+            Ok(pool) => ConnectionState::Connected(Session { pool }),
             Err(error) => ConnectionState::Failed(error_chain(&error)),
         };
     }
@@ -320,16 +325,26 @@ impl Connections {
     }
 }
 
-/// An error and its sources joined by `: `.
+/// Lead with the underlying cause so a narrow status line shows the useful detail.
 pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
-    let mut message = error.to_string();
+    let mut causes = vec![error];
     let mut source = error.source();
     while let Some(cause) = source {
-        message.push_str(": ");
-        message.push_str(&cause.to_string());
+        causes.push(cause);
         source = cause.source();
     }
-    message
+    causes
+        .into_iter()
+        .rev()
+        .map(|cause| {
+            cause
+                .to_string()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 #[cfg(test)]
@@ -391,6 +406,20 @@ mod tests {
         *,
     };
     use quill_core::error::Error;
+
+    #[test]
+    fn error_details_lead_with_the_cause_on_one_line() {
+        let error = Error::DriverConnect {
+            connection: "postgres".into(),
+            source: anyhow::anyhow!("FATAL: SSL required")
+                .context("PostgreSQL connection failed.\ndb error")
+                .into(),
+        };
+        let message = error_chain(&error);
+        assert!(message.starts_with("FATAL: SSL required:"), "{message}");
+        assert!(!message.contains('\n'));
+        assert!(message.ends_with("driver connect failed for postgres"));
+    }
 
     #[test]
     fn connects_once_and_retries_after_failure() {

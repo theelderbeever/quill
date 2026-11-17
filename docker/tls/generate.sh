@@ -6,6 +6,10 @@ umask 077
 mkdir -p "$cert_dir"
 cd "$cert_dir"
 
+# RustFS requires these filenames; share the same development certificate.
+ln -sf development_cert.pem rustfs_cert.pem
+ln -sf development_key.pem rustfs_key.pem
+
 # Reuse valid certificates so restarting Compose does not change client trust.
 if [ "${FORCE_REGENERATE:-0}" != 1 ] &&
     [ -s development_key.pem ] &&

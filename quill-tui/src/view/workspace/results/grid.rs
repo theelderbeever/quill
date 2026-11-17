@@ -1,31 +1,33 @@
-//! A paged, column-scrolled view of one stored result.
+//! A paged, column-scrolled view of one result.
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use datafusion::prelude::SessionContext;
-use quill_io::feather::{FeatherTable, StoredResult};
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
-    text::Span,
+    text::{Line, Span, Text},
     widgets::{Row, Table, TableState},
 };
+
+use crate::widget::inspector::Inspector;
 
 use super::{
     Direction,
     columns::{self, Widths},
-    inspector::Inspector,
     page::PageCache,
 };
 use crate::{
     component::Context,
+    result::ResultTable,
     task::{
         RunId,
-        page::{self, Cell, Page, TABLE},
-        run::ResultDir,
+        page::{self, Cell, Page},
     },
     widget::theme,
 };
+
+/// Header lines: the column name, then its native type.
+const HEADER_ROWS: u16 = 2;
 
 /// Rows moved per mouse wheel notch.
 const WHEEL_ROWS: u64 = 3;
@@ -46,8 +48,10 @@ struct DrawnColumn {
 
 pub struct Grid {
     run: RunId,
-    ctx: SessionContext,
+    table: Arc<ResultTable>,
     columns: Vec<String>,
+    /// Native type names, parallel to `columns`.
+    types: Vec<String>,
     rows: u64,
     cursor_row: u64,
     cursor_col: usize,
@@ -63,30 +67,22 @@ pub struct Grid {
     /// Column whose right edge is being dragged, and its left edge.
     dragging: Option<(usize, u16)>,
     pages: PageCache,
-    _dir: Option<ResultDir>,
 }
 
 impl Grid {
-    /// `dir` is removed with the grid; `None` when another owner keeps it.
-    pub fn new(
-        run: RunId,
-        result: Arc<StoredResult>,
-        dir: Option<ResultDir>,
-        page_rows: u64,
-    ) -> anyhow::Result<Self> {
-        let columns = result
-            .schema()
-            .fields()
+    pub fn new(run: RunId, table: Arc<ResultTable>, page_rows: u64) -> Self {
+        let columns = table.columns().iter().map(|c| c.name.clone()).collect();
+        let types = table
+            .columns()
             .iter()
-            .map(|f| f.name().clone())
+            .map(|c| c.native_type.clone())
             .collect();
-        let rows = result.rows();
-        let ctx = SessionContext::new();
-        ctx.register_table(TABLE, Arc::new(FeatherTable::new(result)?))?;
-        Ok(Self {
+        let rows = table.rows();
+        Self {
             run,
-            ctx,
+            table,
             columns,
+            types,
             rows,
             cursor_row: 0,
             cursor_col: 0,
@@ -98,8 +94,7 @@ impl Grid {
             body_y: 0,
             dragging: None,
             pages: PageCache::new(page_rows, rows),
-            _dir: dir,
-        })
+        }
     }
 
     pub const fn run(&self) -> RunId {
@@ -110,19 +105,16 @@ impl Grid {
         self.rows
     }
 
-    /// Context with this result registered as `r`, including `__row`.
-    pub const fn context(&self) -> &SessionContext {
-        &self.ctx
-    }
-
     /// The full value under the cursor, if its page is loaded.
     pub fn cell(&self) -> Option<&str> {
         let row = self.pages.row(self.cursor_row)?;
         row.cells.get(self.cursor_col).map(Cell::as_str)
     }
 
-    pub fn column(&self) -> Option<&str> {
-        self.columns.get(self.cursor_col).map(String::as_str)
+    /// The cursor's column, by index and name.
+    pub fn column(&self) -> Option<(usize, &str)> {
+        let name = self.columns.get(self.cursor_col)?;
+        Some((self.cursor_col, name))
     }
 
     /// Keep the cursor on the same column after a re-run or new view.
@@ -175,7 +167,7 @@ impl Grid {
             KeyCode::Enter => {
                 let cell = self.pages.row(self.cursor_row).and_then(|row| {
                     let value = row.cells.get(self.cursor_col)?;
-                    Some(Inspector::new(
+                    Some(Inspector::cell(
                         &self.columns[self.cursor_col],
                         row.row + 1,
                         value.as_str(),
@@ -231,13 +223,13 @@ impl Grid {
         area: Rect,
         ctx: &Context,
         widths: &Widths,
-        sort: Option<(&str, Direction)>,
+        sort: Option<(usize, Direction)>,
     ) {
-        if area.height < 2 || area.width == 0 {
+        if area.height <= HEADER_ROWS || area.width == 0 {
             return;
         }
-        self.height = u64::from(area.height - 1);
-        self.body_y = area.y + 1;
+        self.height = u64::from(area.height - HEADER_ROWS);
+        self.body_y = area.y + HEADER_ROWS;
         if self.cursor_row < self.top {
             self.top = self.cursor_row;
         } else if self.cursor_row >= self.top + self.height {
@@ -246,7 +238,7 @@ impl Grid {
         let visible = self.top..(self.top + self.height).min(self.rows);
         for (index, rows) in self.pages.request(visible.clone()) {
             page::spawn(
-                self.ctx.clone(),
+                self.table.clone(),
                 self.run,
                 index,
                 rows,
@@ -254,8 +246,10 @@ impl Grid {
             );
         }
 
-        let header_name = |name: &str| match sort {
-            Some((column, direction)) if column == name => format!("{name} {}", direction.arrow()),
+        let header_name = |index: usize, name: &str| match sort {
+            Some((column, direction)) if column == index => {
+                format!("{name} {}", direction.arrow())
+            }
             _ => name.to_owned(),
         };
         let cap = usize::from(ctx.options().max_column_width.max(1));
@@ -273,7 +267,10 @@ impl Grid {
                             .get(i)
                             .map(|c| columns::display_width(c.display()))
                     })
-                    .chain([columns::display_width(&header_name(name))])
+                    .chain([
+                        columns::display_width(&header_name(i, name)),
+                        columns::display_width(&self.types[i]),
+                    ])
                     .max()
                     .unwrap_or(1);
                 let auto = u16::try_from(longest.clamp(1, cap)).unwrap_or(u16::MAX);
@@ -302,13 +299,19 @@ impl Grid {
             })
             .collect();
 
-        let header = std::iter::once(Span::raw("")).chain(drawn.iter().map(|&(i, width)| {
+        let header = std::iter::once(Text::raw("")).chain(drawn.iter().map(|&(i, width)| {
             let style = if i == self.cursor_col {
                 theme::KEY
             } else {
                 theme::TITLE
             };
-            Span::styled(columns::fit(&header_name(&self.columns[i]), width), style)
+            Text::from(vec![
+                Line::styled(
+                    columns::fit(&header_name(i, &self.columns[i]), width),
+                    style,
+                ),
+                Line::styled(columns::fit(&self.types[i], width), theme::DIM),
+            ])
         }));
         let body = visible.clone().map(|r| {
             let number = Span::styled((r + 1).to_string(), theme::GUTTER);
@@ -339,7 +342,7 @@ impl Grid {
             theme::ROW_CURSOR
         };
         let table = Table::new(body, constraints)
-            .header(Row::new(header))
+            .header(Row::new(header).height(HEADER_ROWS))
             .row_highlight_style(theme::ROW_CURSOR)
             .cell_highlight_style(cell_style);
         let mut state = TableState::new()

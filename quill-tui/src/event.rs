@@ -4,7 +4,7 @@ use std::{sync::Arc, time::Duration};
 use anyhow::Context as _;
 use crossterm::event::EventStream;
 use futures::StreamExt;
-use quill_drivers::ConnectionPool;
+use quill_providers::ConnectionPool;
 use tokio::{
     sync::mpsc::UnboundedReceiver,
     time::{Interval, MissedTickBehavior},
@@ -12,7 +12,7 @@ use tokio::{
 
 use crate::{
     connection::ConnectionId,
-    task::{RunMsg, catalog::CatalogMsg},
+    task::{RunMsg, catalog::CatalogMsg, watch::QueriesChanged},
 };
 
 /// An update from a background task.
@@ -23,6 +23,7 @@ pub enum Msg {
     },
     Run(RunMsg),
     Catalog(CatalogMsg),
+    Queries(QueriesChanged),
 }
 
 pub enum Event {
