@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
-    text::Span,
+    text::{Line, Span, Text},
     widgets::{Row, Table, TableState},
 };
 
@@ -25,6 +25,9 @@ use crate::{
     },
     widget::theme,
 };
+
+/// Header lines: the column name, then its native type.
+const HEADER_ROWS: u16 = 2;
 
 /// Rows moved per mouse wheel notch.
 const WHEEL_ROWS: u64 = 3;
@@ -47,6 +50,8 @@ pub struct Grid {
     run: RunId,
     table: Arc<ResultTable>,
     columns: Vec<String>,
+    /// Native type names, parallel to `columns`.
+    types: Vec<String>,
     rows: u64,
     cursor_row: u64,
     cursor_col: usize,
@@ -67,11 +72,17 @@ pub struct Grid {
 impl Grid {
     pub fn new(run: RunId, table: Arc<ResultTable>, page_rows: u64) -> Self {
         let columns = table.columns().iter().map(|c| c.name.clone()).collect();
+        let types = table
+            .columns()
+            .iter()
+            .map(|c| c.native_type.clone())
+            .collect();
         let rows = table.rows();
         Self {
             run,
             table,
             columns,
+            types,
             rows,
             cursor_row: 0,
             cursor_col: 0,
@@ -214,11 +225,11 @@ impl Grid {
         widths: &Widths,
         sort: Option<(usize, Direction)>,
     ) {
-        if area.height < 2 || area.width == 0 {
+        if area.height <= HEADER_ROWS || area.width == 0 {
             return;
         }
-        self.height = u64::from(area.height - 1);
-        self.body_y = area.y + 1;
+        self.height = u64::from(area.height - HEADER_ROWS);
+        self.body_y = area.y + HEADER_ROWS;
         if self.cursor_row < self.top {
             self.top = self.cursor_row;
         } else if self.cursor_row >= self.top + self.height {
@@ -256,7 +267,10 @@ impl Grid {
                             .get(i)
                             .map(|c| columns::display_width(c.display()))
                     })
-                    .chain([columns::display_width(&header_name(i, name))])
+                    .chain([
+                        columns::display_width(&header_name(i, name)),
+                        columns::display_width(&self.types[i]),
+                    ])
                     .max()
                     .unwrap_or(1);
                 let auto = u16::try_from(longest.clamp(1, cap)).unwrap_or(u16::MAX);
@@ -285,16 +299,19 @@ impl Grid {
             })
             .collect();
 
-        let header = std::iter::once(Span::raw("")).chain(drawn.iter().map(|&(i, width)| {
+        let header = std::iter::once(Text::raw("")).chain(drawn.iter().map(|&(i, width)| {
             let style = if i == self.cursor_col {
                 theme::KEY
             } else {
                 theme::TITLE
             };
-            Span::styled(
-                columns::fit(&header_name(i, &self.columns[i]), width),
-                style,
-            )
+            Text::from(vec![
+                Line::styled(
+                    columns::fit(&header_name(i, &self.columns[i]), width),
+                    style,
+                ),
+                Line::styled(columns::fit(&self.types[i], width), theme::DIM),
+            ])
         }));
         let body = visible.clone().map(|r| {
             let number = Span::styled((r + 1).to_string(), theme::GUTTER);
@@ -325,7 +342,7 @@ impl Grid {
             theme::ROW_CURSOR
         };
         let table = Table::new(body, constraints)
-            .header(Row::new(header))
+            .header(Row::new(header).height(HEADER_ROWS))
             .row_highlight_style(theme::ROW_CURSOR)
             .cell_highlight_style(cell_style);
         let mut state = TableState::new()
